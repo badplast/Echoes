@@ -11,6 +11,13 @@ npm run build      # production → dist/
 npm run preview    # проверить dist на http://localhost:4173
 ```
 
+## Миры
+
+- **World 01 — TIDE** — вода, свет, туман; бухта Пластун.
+- **World 02 — FIBA** — ночная комната, серое кресло и спящая на нём кошка Фиба (процедурная SDF-скульптура, raymarching). Она дышит, шевелит ушами и хвостом, иногда просыпается и потягивается; сильная игра может её разбудить, тихая — нет.
+
+Мир выбирается на заставке или в панели (раздел *Place*). Пэды FIBA: swell · dust · purr · wake · bloom · pulse · stretch · lift. Фейдеры FIBA: Ambience · Dream dust · Haze · Drone/purr.
+
 ## Quick Launch (Windows)
 
 После установки (`npm install`) ECHOES запускается ярлыком **ECHOES** на рабочем столе: он сам поднимет сервер в фоне (или использует уже запущенный) и откроет сайт в Chrome. Ярлык указывает на `launcher\ECHOES.vbs`.

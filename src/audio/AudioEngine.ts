@@ -1,3 +1,4 @@
+import type { WorldId } from '../core/events';
 import type { Macros } from '../core/ParameterStore';
 import { load } from '../core/storage';
 import type { ToneEngine } from './ToneEngine';
@@ -11,6 +12,7 @@ export class AudioEngine {
   private engine: ToneEngine | null = null;
   private loading: Promise<ToneEngine> | null = null;
   private root = 2;
+  private world: WorldId = 'tide';
   volume = load('volume', 0.8);
   muted = load('muted', false);
 
@@ -20,6 +22,7 @@ export class AudioEngine {
       this.loading = import('./ToneEngine').then(async ({ ToneEngine }) => {
         const e = new ToneEngine();
         e.setRoot(this.root);
+        e.setWorld(this.world);
         await e.start();
         e.setVolume(this.volume);
         e.setMuted(this.muted);
@@ -56,6 +59,12 @@ export class AudioEngine {
   setMuted(m: boolean): void {
     this.muted = m;
     this.engine?.setMuted(m);
+  }
+
+  /** Crossfade the sound of the place (and the instrument's character) to another world. */
+  setWorld(id: WorldId): void {
+    this.world = id;
+    this.engine?.setWorld(id);
   }
 
   setRoot(pc: number): void {

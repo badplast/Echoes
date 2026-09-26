@@ -21,7 +21,10 @@ export interface NoteOff {
   note: number;
 }
 
-export type PadGesture = 'swell' | 'shimmer' | 'bloom' | 'wave';
+/** TIDE: swell · shimmer · bloom · wave. FIBA: swell · dust · purr · wake · bloom · pulse · stretch · lift. */
+export type PadGesture = 'swell' | 'shimmer' | 'bloom' | 'wave' | 'dust' | 'purr' | 'wake' | 'pulse' | 'stretch' | 'lift';
+
+export type WorldId = 'tide' | 'fiba';
 
 export interface RawMidi {
   device: string;
@@ -53,6 +56,10 @@ export interface AppEvents extends Record<string, unknown> {
   'param:touched': { key: string; value: number };
   'learn:changed': { key: string | null };
   toast: { text: string };
+  /** A world changed (after the fade). */
+  'world:changed': { id: WorldId };
+  /** Fiba moved on her chair: the fabric answers softly. strength 0..1 */
+  'cat:move': { kind: 'stir' | 'wake' | 'stretch' | 'settle'; strength: number };
 }
 
 export const bus = new EventBus<AppEvents>();

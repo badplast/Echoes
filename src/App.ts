@@ -1,12 +1,13 @@
 import { WebGLRenderer } from 'three';
-import { bus } from './core/events';
+import { bus, type WorldId } from './core/events';
 import { ParameterStore } from './core/ParameterStore';
 import { Generator } from './core/Generator';
 import { AudioEngine } from './audio/AudioEngine';
 import { InputRouter } from './input/InputRouter';
 import { MidiManager } from './input/MidiManager';
 import type { World } from './worlds/World';
-import { TideWorld } from './worlds/tide/TideWorld';
+import { WORLDS, worldEntry } from './worlds/registry';
+import { load, save } from './core/storage';
 import { UI, type UIHost } from './ui/UI';
 
 /**
@@ -20,7 +21,12 @@ export class App implements UIHost {
   readonly midi = new MidiManager((m) => this.router.handleMidi(m));
   readonly audio = new AudioEngine();
   readonly generator = new Generator(this.router.scale);
-  private world: World = new TideWorld();
+  private world: World | null = null;
+  private worldId: WorldId = worldEntry(load<WorldId>('world', 'tide')).id;
+  /** 0..1 fade used while one world hands over to the next */
+  private worldFade = 1;
+  private worldFadeTarget = 1;
+  private switching = false;
   private renderer: WebGLRenderer;
   private ui: UI;
   private entered = false;
@@ -36,8 +42,14 @@ export class App implements UIHost {
   private settle = 0;
 
   get worldTitle(): string {
-    return this.world.title;
+    return worldEntry(this.worldId).title;
   }
+
+  get currentWorld(): WorldId {
+    return this.worldId;
+  }
+
+  readonly worlds = WORLDS.map((w) => ({ id: w.id, title: w.title }));
 
   constructor(private container: HTMLElement) {
     this.renderer = new WebGLRenderer({ antialias: false, powerPreference: 'high-performance', alpha: false, stencil: false });
@@ -45,10 +57,10 @@ export class App implements UIHost {
     this.renderer.domElement.className = 'stage';
     container.append(this.renderer.domElement);
 
-    this.world.mount(this.renderer);
     this.audio.setRoot(this.router.scale.root);
     this.ui = new UI(this);
     this.resize();
+    void this.loadWorld(this.worldId);
 
     window.addEventListener('resize', this.resize);
     window.addEventListener('keydown', this.onKeyDown);
@@ -82,6 +94,36 @@ export class App implements UIHost {
     this.ui.onEntered();
   }
 
+  /** Fade the current world out, swap, fade the next one in. Audio crossfades with it. */
+  async switchWorld(id: WorldId): Promise<void> {
+    if (this.switching || (id === this.worldId && this.world)) return;
+    this.switching = true;
+    this.worldFadeTarget = 0;
+    this.audio.setWorld(id);
+    this.router.releaseAll();
+    await new Promise((r) => setTimeout(r, 900));
+    await this.loadWorld(id);
+    this.switching = false;
+  }
+
+  private async loadWorld(id: WorldId): Promise<void> {
+    const entry = worldEntry(id);
+    const next = await entry.create();
+    this.world?.dispose();
+    this.world = next;
+    this.worldId = entry.id;
+    next.mount(this.renderer);
+    this.resize();
+    this.router.padGestures = next.pads;
+    this.generator.mode = entry.id;
+    this.audio.setWorld(entry.id);
+    this.ui.setWorld(next);
+    save('world', entry.id);
+    this.worldFade = 0;
+    this.worldFadeTarget = 1;
+    bus.emit('world:changed', { id: entry.id });
+  }
+
   async connectMidi(): Promise<void> {
     await this.midi.request();
   }
@@ -108,9 +150,13 @@ export class App implements UIHost {
       // behind the intro the world is already alive, just veiled
       this.reveal = Math.min(0.42, this.reveal + dt / 3);
     }
-    this.world.setReveal(this.reveal * this.reveal * (3 - 2 * this.reveal));
+    this.worldFade += (this.worldFadeTarget - this.worldFade) * (1 - Math.exp(-dt / (this.worldFadeTarget > 0.5 ? 0.9 : 0.25)));
     this.audio.update(m, dt);
-    this.world.frame(dt, m);
+    if (this.world) {
+      const r = this.reveal * this.reveal * (3 - 2 * this.reveal);
+      this.world.setReveal(r * this.worldFade);
+      this.world.frame(dt, m);
+    }
     this.adaptResolution(rawDt);
   };
 
@@ -144,7 +190,7 @@ export class App implements UIHost {
     this.pixelRatio = Math.min(this.pixelRatio, this.maxPixelRatio);
     this.renderer.setPixelRatio(this.pixelRatio);
     this.renderer.setSize(w, h, false);
-    this.world.resize(w, h, this.pixelRatio);
+    this.world?.resize(w, h, this.pixelRatio);
   };
 
   // ------------------------------------------------------------------ input
@@ -198,7 +244,7 @@ export class App implements UIHost {
       const r = el.getBoundingClientRect();
       const x = (e.clientX - r.left) / r.width;
       const y = (e.clientY - r.top) / r.height;
-      const hit = this.world.pick(x * 2 - 1, -(y * 2 - 1));
+      const hit = this.world?.pick(x * 2 - 1, -(y * 2 - 1));
       return { x, y, hit: hit ?? undefined };
     };
     el.addEventListener('pointerdown', (e) => {
@@ -232,7 +278,7 @@ export class App implements UIHost {
     document.removeEventListener('visibilitychange', this.onVisibility);
     this.midi.dispose();
     this.audio.dispose();
-    this.world.dispose();
+    this.world?.dispose();
     this.renderer.dispose();
   }
 }

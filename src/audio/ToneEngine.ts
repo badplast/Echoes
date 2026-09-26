@@ -1,5 +1,5 @@
 import * as Tone from 'tone';
-import { bus, type NoteOn, type PadGesture } from '../core/events';
+import { bus, type NoteOn, type PadGesture, type WorldId } from '../core/events';
 import type { Macros } from '../core/ParameterStore';
 import { echoFeedback, echoTime, fogLevel, lerp, pitchNorm, rainLevel, smooth, warmth } from '../core/derive';
 import { load, save } from '../core/storage';
@@ -113,6 +113,19 @@ export class ToneEngine {
   private waveFilter!: Tone.Filter;
   private waveGain!: Tone.Gain;
   private noises: Tone.Noise[] = [];
+
+  /** FIBA: the sound of a sleeping room. */
+  private fibaBus!: Tone.Gain;
+  private roomGain!: Tone.Gain;
+  private purrGain!: Tone.Gain;
+  private purrLfo!: Tone.LFO;
+  private purrFilter!: Tone.Filter;
+  private rustle!: Tone.NoiseSynth;
+  private rustlePan!: Tone.Panner;
+  private swishFilter!: Tone.Filter;
+  private swishGain!: Tone.Gain;
+  private purrAccent = 0;
+  private lastWorldBell = '';
 
   private sustain = false;
   private expr = { bend: 0, mod: 0, pressure: 0 };
@@ -315,7 +328,35 @@ export class ToneEngine {
     this.waveGain.connect(this.master);
     this.waveGain.connect(this.reverbSend);
 
+    // ---- FIBA: room tone, a purring texture, grains of fabric, the chair's rustle
+    this.fibaBus = new Tone.Gain(0);
+    this.fibaBus.connect(this.master);
+    const fibaVerb = new Tone.Gain(0.25);
+    this.fibaBus.connect(fibaVerb);
+    fibaVerb.connect(this.reverbSend);
+    const roomLp = new Tone.Filter({ type: 'lowpass', frequency: 650, rolloff: -24 });
+    this.roomGain = new Tone.Gain(0.02);
+    pink.chain(roomLp, this.roomGain, this.fibaBus);
+    // purr: low noise, pulsing ~24 times a second, breathing slowly in and out
+    this.purrFilter = new Tone.Filter({ type: 'bandpass', frequency: 95, Q: 1.2 });
+    const purrAm = new Tone.Gain(0);
+    this.purrLfo = new Tone.LFO({ frequency: 24, min: 0.1, max: 1, type: 'sine' }).start();
+    this.purrLfo.connect(purrAm.gain);
+    this.purrGain = new Tone.Gain(0);
+    const purrLp = new Tone.Filter({ type: 'lowpass', frequency: 260, rolloff: -24 });
+    brown.chain(this.purrFilter, purrAm, purrLp, this.purrGain, this.fibaBus);
+    // grains: tiny soft ticks of fabric and dust (instead of TIDE's water drops)
+    this.rustle = new Tone.NoiseSynth({ noise: { type: 'pink' }, envelope: { attack: 0.004, decay: 0.07, sustain: 0, release: 0.05 }, volume: -34 });
+    const rustleBp = new Tone.Filter({ type: 'bandpass', frequency: 2600, Q: 0.8 });
+    this.rustlePan = new Tone.Panner(0);
+    this.rustle.chain(rustleBp, this.rustlePan, this.fibaBus);
+    // the chair's soft rustle when Fiba moves
+    this.swishFilter = new Tone.Filter({ type: 'bandpass', frequency: 1200, Q: 0.7 });
+    this.swishGain = new Tone.Gain(0);
+    pink.chain(this.swishFilter, this.swishGain, this.fibaBus);
+
     this.unsubs.push(
+      bus.on('cat:move', (e) => this.catMove(e.strength)),
       bus.on('note:on', (e) => this.noteOn(e)),
       bus.on('note:off', (e) => this.noteOff(e.id)),
       bus.on('sustain', (e) => this.setSustain(e.on)),
@@ -337,6 +378,8 @@ export class ToneEngine {
     const vel = e.velocity;
     const pn = pitchNorm(e.note);
     const w = m.world;
+    // FIBA: warmer, softer, closer — the same instrument played quietly in a sleeping room
+    const fiba = this.world === 'fiba';
 
     // Retrigger an identical pitch instead of stacking a second voice on it.
     let v = this.voices.find((x) => x.note === e.note && x.releasedAt !== Infinity);
@@ -358,17 +401,17 @@ export class ToneEngine {
     //   night: dark, round, narrow — triangle body, little saw, slow bloom
     //   day:   bright, airy, wide  — open saw with a touch of resonance, octave shimmer, quicker
     v.saw.spread = lerp(8, 34, w) + m.texture * 10 + chaos * 8;
-    v.sawGain.gain.setValueAtTime(lerp(0.2, 0.58, w), t0);
-    v.bodyGain.gain.setValueAtTime(lerp(0.85, 0.22, w) * lerp(1, 0.5, pn), t0);
-    v.airBase = smooth(0.35, 1, w) * 0.16 * lerp(1, 0.5, pn);
+    v.sawGain.gain.setValueAtTime(lerp(0.2, 0.58, w) * (fiba ? 0.4 : 1), t0);
+    v.bodyGain.gain.setValueAtTime(lerp(0.85, 0.22, w) * lerp(1, 0.5, pn) * (fiba ? 1.25 : 1), t0);
+    v.airBase = smooth(0.35, 1, w) * 0.16 * lerp(1, 0.5, pn) * (fiba ? 0.5 : 1);
     v.airGain.gain.cancelAndHoldAtTime(t0);
     v.airGain.gain.linearRampToValueAtTime(v.airBase + this.mod * 0.12, t0 + 0.4);
-    v.filter.Q.setValueAtTime(lerp(0.5, 1.6, w), t0);
-    const spread = lerp(0.25, 1.0, w);
+    v.filter.Q.setValueAtTime(fiba ? 0.45 : lerp(0.5, 1.6, w), t0);
+    const spread = lerp(0.25, 1.0, w) * (fiba ? 0.6 : 1);
     v.pan.pan.setValueAtTime(((pn - 0.5) * 0.6 + (Math.random() - 0.5) * (0.2 + chaos * 0.7)) * spread, t0);
 
     // Soft, velocity-shaped envelopes. Attack stays ambient even when played hard.
-    const attack = lerp(1.25, 0.28, Math.pow(vel, 0.8)) * lerp(1.25, 0.85, m.energy) * lerp(1.35, 0.6, w);
+    const attack = lerp(1.25, 0.28, Math.pow(vel, 0.8)) * lerp(1.25, 0.85, m.energy) * lerp(1.35, 0.6, w) * (fiba ? 1.3 : 1);
     const pitchComp = pn > 0.62 ? lerp(1, 0.55, (pn - 0.62) / 0.38) : pn < 0.2 ? 0.8 : 1;
     // the world's own echoes belong to the atmosphere (fader 1); pads and played notes do not
     const src = e.source === 'generative' ? 0.8 * Math.min(1.4, m.atmos / 0.7) : e.source === 'pad' ? 0.85 : 1;
@@ -397,7 +440,7 @@ export class ToneEngine {
     // The bell: the drop-into-water articulation you hear the instant you press.
     // Night: a soft, almost sine "kalimba" low in the mix. Day: a clear glass bell.
     const bellNote = e.note < 60 ? e.note + 12 : e.note;
-    const bellVel = Math.pow(vel, 1.6) * lerp(0.35, 1, pn) * lerp(0.45, 1.2, w) * (1 + this.mod * 0.5) * (e.source === 'generative' ? 0.7 : 1);
+    const bellVel = Math.pow(vel, 1.6) * lerp(0.35, 1, pn) * lerp(0.45, 1.2, w) * (1 + this.mod * 0.5) * (e.source === 'generative' ? 0.7 : 1) * (fiba ? 0.75 : 1);
     if (bellVel > 0.02 && this.bell.activeVoices < this.bell.maxPolyphony) this.bell.triggerAttackRelease(mtof(bellNote) * Math.pow(2, cents / 2400), 0.05, t, Math.min(1, bellVel));
   }
 
@@ -416,7 +459,7 @@ export class ToneEngine {
   private release(v: Voice): void {
     const m = this.m;
     const t = Tone.immediate() + 0.005;
-    const rel = m ? lerp(3.2, 7.5, m.space) * lerp(1.1, 0.8, m.energy) * lerp(1.25, 0.85, m.world) : 5;
+    const rel = (m ? lerp(3.2, 7.5, m.space) * lerp(1.1, 0.8, m.energy) * lerp(1.25, 0.85, m.world) : 5) * (this.world === 'fiba' ? 1.2 : 1);
     // A quick tap still blooms: let the attack finish, then fade.
     const from = Math.max(t, v.attackEnd + 0.002);
     v.amp.gain.cancelAndHoldAtTime(from);
@@ -451,14 +494,30 @@ export class ToneEngine {
   private applyDetune(): void {
     if (!this.ready) return;
     const bendCents = this.expr.bend * 200;
+    if (this.world === 'fiba') {
+      // a slow drift of pitch, like an old tape: warmth, not wobble
+      const wow = 3.5 + this.mod * 6 + (this.m ? this.m.chaos * 3 : 0);
+      this.detune.frequency.value = 0.42;
+      this.detune.min = bendCents - wow;
+      this.detune.max = bendCents + wow;
+      return;
+    }
     // gentle vibrato: expression, not wobble
     const depth = this.mod * 9 + (this.m ? this.m.chaos * 3 : 0);
+    this.detune.frequency.value = 4.6;
     this.detune.min = bendCents - depth;
     this.detune.max = bendCents + depth;
   }
 
   private drip(note: number, velocity: number): void {
     if (!this.ready || !this.m) return;
+    if (this.world === 'fiba') {
+      const t = Tone.immediate() + 0.005;
+      this.rustlePan.pan.setValueAtTime((Math.random() - 0.5) * 1.2, t);
+      this.rustle.volume.setValueAtTime(-40 + velocity * 8 + this.m.texture * 4, t);
+      this.rustle.triggerAttackRelease(0.03, t, 0.6);
+      return;
+    }
     const s = this.drips[this.dripIdx++ % this.drips.length];
     const t = Tone.immediate() + 0.005;
     const f = mtof(note);
@@ -469,8 +528,24 @@ export class ToneEngine {
     this.dripPans[(this.dripIdx - 1) % this.dripPans.length].pan.setValueAtTime((Math.random() - 0.5) * 1.4, t);
   }
 
+  /** Fiba shifting on the fabric: a soft, short rustle. */
+  private catMove(strength: number): void {
+    if (!this.ready || this.world !== 'fiba') return;
+    const t = Tone.immediate() + 0.01;
+    const g = this.swishGain.gain;
+    g.cancelAndHoldAtTime(t);
+    g.linearRampToValueAtTime(0.02 + strength * 0.035, t + 0.45);
+    g.setTargetAtTime(0, t + 0.9, 0.5);
+    const f = this.swishFilter.frequency;
+    f.cancelAndHoldAtTime(t);
+    f.exponentialRampToValueAtTime(2200, t + 0.5);
+    f.exponentialRampToValueAtTime(900, t + 2);
+  }
+
   private pad(gesture: PadGesture, velocity: number): void {
-    if (!this.ready || gesture !== 'wave') return;
+    if (!this.ready) return;
+    if (gesture === 'purr') this.purrAccent = Math.min(1, this.purrAccent + 0.6 + velocity * 0.4);
+    if (gesture !== 'wave') return;
     // The wash of a big wave: swells over ~1.4 s, breaks, drains away. Never a click.
     const t = Tone.immediate() + 0.01;
     const peak = 0.18 + velocity * 0.22;
@@ -492,6 +567,7 @@ export class ToneEngine {
     this.m = m;
     if (!this.ready) return;
     this.gust = Math.max(0, this.gust - dt * 0.3);
+    this.purrAccent = Math.max(0, this.purrAccent - dt * 0.1);
     this.mod += (this.expr.mod - this.mod) * (1 - Math.exp(-dt / 0.15));
     this.accum += dt;
     if (this.accum < 1 / 30) return;
@@ -532,8 +608,10 @@ export class ToneEngine {
     this.delaySend.gain.rampTo(lerp(0.1, 0.3, m.space) * lerp(0.8, 1.3, e), R);
 
     // Bell: night = soft rounded kalimba, day = clear glass; mod brightens it.
-    const h = w < 0.33 ? 1 : w < 0.66 ? 2 : 3;
-    const mi = Math.round((lerp(0.6, 3.4, w) + m.texture * 1.2 + mod * 2) * 10) / 10;
+    // In FIBA it stays a quiet music box: octave partial, a little shimmer.
+    const inFiba = this.world === 'fiba';
+    const h = inFiba ? 2 : w < 0.33 ? 1 : w < 0.66 ? 2 : 3;
+    const mi = Math.round(((inFiba ? lerp(0.5, 1.4, w) : lerp(0.6, 3.4, w)) + m.texture * (inFiba ? 0.4 : 1.2) + mod * 2) * 10) / 10;
     if (h !== this.lastBell.h || Math.abs(mi - this.lastBell.mi) > 0.25) {
       this.bell.set({ harmonicity: h, modulationIndex: mi });
       this.lastBell = { h, mi };
@@ -564,8 +642,19 @@ export class ToneEngine {
     this.droneGain.gain.rampTo(lerp(0.075, 0.05, w) * lerp(0.8, 1.1, m.space) * droneLvl, 1);
     this.droneAirGain.gain.rampTo(smooth(0.35, 1, w) * 0.35 + m.drone * 0.15, 1);
 
+    // Each world has its own place: crossfade between TIDE's sea and FIBA's room.
+    const fiba = this.world === 'fiba';
+    const atmosLevel = Math.pow(m.atmos / 0.7, 2);
+    this.atmosBus.gain.rampTo(fiba ? 0 : atmosLevel, 1.2);
+    this.fibaBus.gain.rampTo(fiba ? atmosLevel : 0, 1.2);
+    if (fiba) this.updateFiba(m);
+    if (this.lastWorldBell !== this.world) {
+      this.lastWorldBell = this.world;
+      this.bell.set({ envelope: { decay: fiba ? 1.9 : 2.8, release: fiba ? 2.2 : 3 } });
+      this.lastBell = { h: -1, mi: -1 };
+    }
+
     // Atmosphere (fader 1) + WEATHER + ENERGY + rain (fader 2): the sound of the place.
-    this.atmosBus.gain.rampTo(Math.pow(m.atmos / 0.7, 2), R);
     const wx = m.weather;
     const rain = rainLevel(m);
     this.wind.frequency.rampTo(lerp(0.03, 0.3, m.motion * 0.5 + wx * 0.3 + e * 0.4), R);
@@ -580,6 +669,36 @@ export class ToneEngine {
     this.surfFilter.frequency.rampTo(lerp(500, 1100, e), 1);
 
     this.applyDetune();
+  }
+
+  world: WorldId = 'tide';
+  setWorld(id: WorldId): void {
+    this.world = id;
+    this.applyDetune();
+  }
+
+  /** FIBA's instrument space and its room, refreshed with the other parameters. */
+  private updateFiba(m: Macros): void {
+    const R = 0.12;
+    const w = m.world;
+    // the lamp-lit night is darker and closer than the sea; SPACE opens it into a dream-room
+    this.busFilter.frequency.rampTo(lerp(700, 3800, w) * (1 + this.mod * 1.2) * lerp(1.1, 0.8, m.fog), R);
+    this.baseCutoff *= 0.55;
+    this.reverbTone.frequency.rampTo(lerp(1400, 3600, w) * lerp(1.1, 0.75, m.fog), R);
+    this.revSmallGain.gain.rampTo(lerp(0.9, 0.35, m.space), R);
+    this.revLargeGain.gain.rampTo(lerp(0.05, 0.7, m.space), R);
+    this.delaySend.gain.rampTo(lerp(0.05, 0.16, m.space), R);
+    this.chorus.wet.rampTo(lerp(0.25, 0.45, m.texture), R);
+    // room tone: the air of the room, a little more when the air is dreamy
+    this.roomGain.gain.rampTo(lerp(0.012, 0.03, m.weather) * lerp(0.8, 1.3, m.texture), 0.5);
+    // purr: under the drone (fader 4), deeper when she is content (pad), breathing slowly
+    const breath = 0.6 + 0.4 * Math.sin(performance.now() / 1000 * Math.PI * 2 * lerp(0.2, 0.3, m.energy));
+    this.purrGain.gain.rampTo((Math.pow(m.drone, 1.5) * 0.22 + this.purrAccent * 0.35) * breath, 0.15);
+    this.purrLfo.frequency.rampTo(lerp(22, 27, m.energy) + m.chaos * 2, 1);
+    this.purrFilter.frequency.rampTo(lerp(80, 120, w), 1);
+    // the drone itself is softer here and sits lower
+    this.droneGain.gain.rampTo(lerp(0.06, 0.045, w) * Math.pow(m.drone / 0.6, 1.3) * 0.7, 1);
+    this.droneLfo.max = lerp(300, 800, w);
   }
 
   /** Root pitch class drives the drone; 36 + pc keeps it low but audible. */

@@ -1,11 +1,11 @@
-import { bus, type RawMidi } from '../core/events';
+import { bus, type RawMidi, type WorldId } from '../core/events';
 import { FADERS, MACROS, MACRO_INFO, type ParamKey, type ParameterStore } from '../core/ParameterStore';
 import { NOTE_NAMES, SCALES, noteName } from '../core/scales';
 import { load, save } from '../core/storage';
 import type { AudioEngine } from '../audio/AudioEngine';
 import type { InputRouter } from '../input/InputRouter';
 import { ALL_INPUTS, type MidiManager } from '../input/MidiManager';
-import { paletteName } from '../worlds/tide/palettes';
+import type { World } from '../worlds/World';
 import { h } from './dom';
 
 export interface UIHost {
@@ -17,6 +17,9 @@ export interface UIHost {
   connectMidi(): Promise<void>;
   toggleFullscreen(): void;
   worldTitle: string;
+  worlds: { id: WorldId; title: string }[];
+  currentWorld: WorldId;
+  switchWorld(id: WorldId): Promise<void>;
 }
 
 const IDLE_MS = 3200;
@@ -38,7 +41,11 @@ export class UI {
   private holdEl = h('span.hold', {}, 'hold');
   private volInput: HTMLInputElement | null = null;
   private hintEl = h('div.hint');
-  private sliders = new Map<ParamKey, { input: HTMLInputElement; value: HTMLElement; learn: HTMLButtonElement; row: HTMLElement }>();
+  private sliders = new Map<ParamKey, { input: HTMLInputElement; value: HTMLElement; learn: HTMLButtonElement; row: HTMLElement; label: HTMLElement; lo: HTMLElement; hi: HTMLElement }>();
+  private world: World | null = null;
+  private markWorld = h('span.mark-world', {}, '');
+  private worldPicks: HTMLButtonElement[] = [];
+  private worldSelect = h('select.select', { 'aria-label': 'World' });
   private deviceSelect = h('select.select', { 'aria-label': 'MIDI device' });
   private midiNote = h('p.panel-note');
   private connectBtn!: HTMLButtonElement;
@@ -93,11 +100,44 @@ export class UI {
       {},
       h('h1.title', {}, 'ECHOES'),
       h('p.subtitle', {}, 'an audiovisual world you can play'),
-      h('p.world-name', {}, this.host.worldTitle),
+      h('div.world-pick', {}, ...this.buildWorldPicks()),
       h('div.intro-actions', {}, midiBtn, keysBtn),
       h('p.intro-foot', {}, 'Headphones recommended · sound starts when you enter'),
     );
     this.root.append(this.intro);
+  }
+
+  private buildWorldPicks(): HTMLButtonElement[] {
+    this.worldPicks = this.host.worlds.map((w) => {
+      const b = h('button.world-name', { type: 'button', 'data-world': w.id }, w.title);
+      b.addEventListener('click', () => void this.host.switchWorld(w.id));
+      return b;
+    });
+    return this.worldPicks;
+  }
+
+  /** The app calls this whenever a world has been mounted. */
+  setWorld(world: World): void {
+    this.world = world;
+    for (const b of this.worldPicks) b.classList.toggle('on', b.dataset.world === world.id);
+    this.worldSelect.value = world.id;
+    this.markWorld.textContent = world.id.toUpperCase();
+    for (const [key, s] of this.sliders) {
+      const info = this.info(key);
+      s.label.textContent = info.label;
+      s.lo.textContent = info.lo;
+      s.hi.textContent = info.hi;
+      this.syncSlider(key, this.host.params.target[key]);
+    }
+  }
+
+  private info(key: ParamKey) {
+    return this.world?.labels[key] ?? MACRO_INFO[key];
+  }
+
+  private valueText(key: ParamKey, v: number): string {
+    if (key === 'color' && this.world?.paletteName) return this.world.paletteName(v);
+    return v.toFixed(2);
   }
 
   /** Called by the app once audio is running and the world has started to reveal. */
@@ -109,7 +149,7 @@ export class UI {
     this.refreshStatus();
     this.refreshAudio();
     this.host.audio.onStateChange(() => this.refreshAudio());
-    this.hintEl.textContent = 'play  A S D F G H J K L   ·   Z X octave   ·   space sustain   ·   1–8 + ↑↓ shape   ·   click the water';
+    this.hintEl.textContent = 'play  A S D F G H J K L   ·   Z X octave   ·   space sustain   ·   enter hold   ·   1–8 + ↑↓ shape';
     this.hintEl.classList.add('show');
     window.setTimeout(() => this.hintEl.classList.remove('show'), 9000);
     this.wake();
@@ -123,7 +163,7 @@ export class UI {
     this.hud = h(
       'div.hud',
       {},
-      h('div.hud-mark', {}, h('span.mark-title', {}, 'ECHOES'), h('span.mark-world', {}, 'TIDE')),
+      h('div.hud-mark', {}, h('span.mark-title', {}, 'ECHOES'), this.markWorld),
       h('div.hud-status', {}, this.statusEl, this.holdEl),
       h('div.hud-actions', {}, fsBtn, ctlBtn),
       this.hintEl,
@@ -176,6 +216,9 @@ export class UI {
 
     const makeRow = (key: ParamKey, index: string) => {
       const info = MACRO_INFO[key];
+      const labelEl = h('span.macro-label', {}, info.label);
+      const loEl = h('span', {}, info.lo);
+      const hiEl = h('span', {}, info.hi);
       const input = h('input.slider', { type: 'range', min: 0, max: 1, step: 0.001, value: params.target[key], 'aria-label': info.label });
       const value = h('span.macro-value');
       const learn = h('button.learn', { type: 'button', title: 'MIDI Learn: click, then move a knob' });
@@ -188,11 +231,11 @@ export class UI {
       const row = h(
         'div.macro',
         {},
-        h('div.macro-head', {}, h('span.macro-index', {}, index), h('span.macro-label', {}, info.label), value, learn),
+        h('div.macro-head', {}, h('span.macro-index', {}, index), labelEl, value, learn),
         input,
-        h('div.macro-range', {}, h('span', {}, info.lo), h('span', {}, info.hi)),
+        h('div.macro-range', {}, loEl, hiEl),
       );
-      this.sliders.set(key, { input, value, learn, row });
+      this.sliders.set(key, { input, value, learn, row, label: labelEl, lo: loEl, hi: hiEl });
       this.syncSlider(key, params.target[key]);
       return row;
     };
@@ -216,13 +259,17 @@ export class UI {
     this.debugBtn = h('button.chip', { type: 'button', onclick: () => this.setDebug(!this.debugOn) }, 'MIDI monitor');
     this.connectBtn = h('button.chip', { type: 'button', onclick: () => void this.host.connectMidi() }, 'Connect MIDI');
     this.deviceSelect.addEventListener('change', () => this.host.midi.select(this.deviceSelect.value));
+    this.worldSelect.replaceChildren(...this.host.worlds.map((w) => h('option', { value: w.id }, w.title)));
+    this.worldSelect.value = this.host.currentWorld;
+    this.worldSelect.addEventListener('change', () => void this.host.switchWorld(this.worldSelect.value as WorldId));
 
     this.panel = h(
       'aside.panel',
       { 'aria-label': 'Controls' },
       h('header.panel-head', {}, h('span', {}, 'Controls'), h('button.close', { type: 'button', 'aria-label': 'Close', onclick: () => this.togglePanel(false) }, '×')),
+      h('section.panel-sec', {}, h('h3', {}, 'Place'), h('div.row', {}, this.worldSelect)),
       h('section.panel-sec', {}, h('h3', {}, 'Input'), h('div.row', {}, this.deviceSelect, this.connectBtn), this.midiNote),
-      h('section.panel-sec.macros', {}, h('h3', {}, 'World'), ...rows),
+      h('section.panel-sec.macros', {}, h('h3', {}, 'Macros'), ...rows),
       h('section.panel-sec.macros', {}, h('h3', {}, 'Mix'), ...faderRows),
       h(
         'section.panel-sec',
@@ -267,7 +314,7 @@ export class UI {
     const s = this.sliders.get(key);
     if (!s) return;
     if (document.activeElement !== s.input) s.input.value = String(v);
-    s.value.textContent = key === 'color' ? paletteName(v) : v.toFixed(2);
+    s.value.textContent = this.valueText(key, v);
     s.input.style.setProperty('--fill', `${v * 100}%`);
   }
 
@@ -344,7 +391,7 @@ export class UI {
       case 'cc': {
         title = `CC ${m.data1}`;
         const hit = this.host.router.learn.find(m.channel, m.data1);
-        lines = [`Value: ${m.data2}`, hit ? `→ ${MACRO_INFO[hit.key].label}` : m.data1 === 64 ? '→ sustain' : m.data1 === 1 ? '→ mod / vibrato' : 'unmapped'];
+        lines = [`Value: ${m.data2}`, hit ? `→ ${this.info(hit.key).label}` : m.data1 === 64 ? '→ sustain' : m.data1 === 1 ? '→ mod / vibrato' : 'unmapped'];
         break;
       }
       case 'pitchbend':
@@ -389,8 +436,8 @@ export class UI {
 
   private showReadout(key: ParamKey, v: number): void {
     if (this.panelOpen) return;
-    const info = MACRO_INFO[key];
-    const val = key === 'color' ? paletteName(v) : v.toFixed(2);
+    const info = this.info(key);
+    const val = this.valueText(key, v);
     this.readout.replaceChildren(
       h('span.ro-label', {}, info.label),
       h('span.ro-bar', { style: `--fill:${v * 100}%` }),

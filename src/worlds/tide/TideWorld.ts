@@ -32,8 +32,8 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 import { bus, type NoteOn, type PadGesture } from '../../core/events';
 import type { Macros } from '../../core/ParameterStore';
 import { echoFeedback, echoTime, fogLevel, lerp, pitchNorm, rainLevel, smooth, timeScale } from '../../core/derive';
-import type { World } from '../World';
-import { createPalette, samplePalette } from './palettes';
+import type { ParamLabels, World } from '../World';
+import { createPalette, paletteName, samplePalette } from './palettes';
 import { createCloudNoise, createWaterDetail } from './noise';
 import { NOTE_RIPPLES, ORBS, RIPPLES } from './shaders/common';
 import { skyFragment, skyVertex } from './shaders/sky';
@@ -114,8 +114,13 @@ function makeWaterGeometry(seg: number, extent: number): BufferGeometry {
 }
 
 export class TideWorld implements World {
-  readonly id = 'tide';
+  readonly id = 'tide' as const;
   readonly title = 'World 01 — TIDE';
+  readonly pads: PadGesture[] = ['swell', 'shimmer', 'bloom', 'wave', 'swell', 'shimmer', 'bloom', 'wave'];
+  readonly labels: ParamLabels = {};
+  paletteName(color: number): string {
+    return paletteName(color);
+  }
 
   private renderer!: WebGLRenderer;
   private scene = new Scene();

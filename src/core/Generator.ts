@@ -1,4 +1,4 @@
-import { bus, type NoteSource, type PadGesture } from './events';
+import { bus, type NoteSource, type PadGesture, type WorldId } from './events';
 import type { Macros } from './ParameterStore';
 import type { ScaleLock } from './scales';
 import { eventInterval, lerp, rainLevel, smooth } from './derive';
@@ -22,6 +22,8 @@ export class Generator {
   private counter = 0;
   private lastUserAt = -99;
   private now = 0;
+  /** TIDE answers like the sea; FIBA answers softly, higher, like a music box in a sleeping room. */
+  mode: WorldId = 'tide';
 
   constructor(private scale: ScaleLock) {
     bus.on('note:on', (e) => {
@@ -53,7 +55,10 @@ export class Generator {
       this.nextEcho = now + Math.max(0.8, interval) + quiet;
     }
 
-    const dripRate = rainLevel(m) * 8 + smooth(0.15, 0.5, m.weather) * 1.5 + m.texture * m.weather * 2;
+    // TIDE: drops of rain. FIBA: grains of dust and fabric (TEXTURE + dreamy air + fader 2).
+    const dripRate = this.mode === 'fiba'
+      ? m.texture * 1.6 + m.weather * 1.2 + m.rain * 5
+      : rainLevel(m) * 8 + smooth(0.15, 0.5, m.weather) * 1.5 + m.texture * m.weather * 2;
     if (dripRate > 0.05 && now >= this.nextDrip) {
       this.drip();
       this.nextDrip = now + (-Math.log(1 - Math.random()) / dripRate);
@@ -64,7 +69,7 @@ export class Generator {
 
   pad(gesture: PadGesture, index: number, velocity: number): void {
     const root = this.scale.root;
-    const lift = index >= 4 ? 12 : 0;
+    const lift = this.mode === 'tide' && index >= 4 ? 12 : 0;
     const v = 0.35 + velocity * 0.55;
     switch (gesture) {
       case 'swell': {
@@ -97,6 +102,59 @@ export class Generator {
         this.play(this.scale.quantize(deep + 24), v * 0.3, 2.5, 0.9, 'pad');
         break;
       }
+      // ---------------------------------------------------------------- FIBA
+      case 'dust': {
+        // a fine drift of high notes, like dust turning in the moonlight
+        let n = this.scale.quantize(root + 84);
+        for (let i = 0; i < 6; i++) {
+          this.play(n, v * 0.32 * (1 - i * 0.1), 1.3, i * 0.19 + Math.random() * 0.06, 'pad');
+          n = this.scale.step(n, Math.random() < 0.6 ? 1 : -1);
+        }
+        break;
+      }
+      case 'purr': {
+        // low and warm: root and fifth under the drone's purr (audio swells the purr itself)
+        const low = this.scale.quantize(root + 36);
+        this.play(low, v * 0.55, 6, 0, 'pad');
+        this.play(this.scale.quantize(low + 7), v * 0.3, 5, 0.6, 'pad');
+        break;
+      }
+      case 'wake': {
+        // a small rising question: Fiba lifts her head, listens, settles
+        let n = this.scale.quantize(root + 62);
+        for (let i = 0; i < 3; i++) {
+          this.play(n, v * (0.5 - i * 0.08), 2.4, i * 0.42, 'pad');
+          n = this.scale.step(n, 2);
+        }
+        break;
+      }
+      case 'pulse': {
+        // one soft breath of a chord: the lamp glows with it
+        let n = this.scale.quantize(root + 55);
+        for (let i = 0; i < 3; i++) {
+          this.play(n, v * 0.42, 3.2, 0, 'pad');
+          n = this.scale.step(n, 2);
+        }
+        break;
+      }
+      case 'stretch': {
+        // a long slow unfolding upward, as long as the stretch itself
+        let n = this.scale.quantize(root + 48);
+        for (let i = 0; i < 5; i++) {
+          this.play(n, v * (0.35 + i * 0.04), 3.5, i * 0.55, 'pad');
+          n = this.scale.step(n, 2);
+        }
+        break;
+      }
+      case 'lift': {
+        // the room brightens for a moment: an open chord an octave up
+        let n = this.scale.quantize(root + 67);
+        for (let i = 0; i < 4; i++) {
+          this.play(n, v * 0.38, 4, i * 0.06, 'pad');
+          n = this.scale.step(n, 2);
+        }
+        break;
+      }
     }
   }
 
@@ -115,8 +173,10 @@ export class Generator {
       const chord = [0, 7, 12, 14, 19];
       note = this.scale.quantize(this.scale.root + 60 + chord[Math.floor(Math.random() * chord.length)]);
     }
+    // FIBA's echoes sit higher and softer, a music box answering from another room
+    if (this.mode === 'fiba' && note < 64) note += 12;
     note = Math.max(40, Math.min(96, note));
-    const vel = lerp(0.12, 0.34, m.energy) * (0.7 + Math.random() * 0.5);
+    const vel = lerp(0.12, 0.34, m.energy) * (0.7 + Math.random() * 0.5) * (this.mode === 'fiba' ? 0.75 : 1);
     this.play(note, vel, lerp(3.5, 1.4, m.energy), 0);
     // At higher energy the world sometimes answers with a short phrase.
     if (Math.random() < m.energy * 0.45) {

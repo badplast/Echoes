@@ -10,7 +10,6 @@ const KEY_TO_SEMITONE: Record<string, number> = {
   KeyU: 10, KeyJ: 11, KeyK: 12, KeyO: 13, KeyL: 14, KeyP: 15, Semicolon: 16, Quote: 17, BracketRight: 18,
 };
 
-const PAD_GESTURES: PadGesture[] = ['swell', 'shimmer', 'bloom', 'wave'];
 /** General MIDI convention: channel 10 is percussion, which is where MiniLab 3 pads live by default. */
 const PAD_CHANNEL = 10;
 
@@ -32,6 +31,8 @@ export class InputRouter {
   private lastCC = new Map<string, number>();
   private sustainKey = false;
   private sustainPedal = false;
+  /** Pad index 0-7 -> gesture; each world brings its own set. */
+  padGestures: PadGesture[] = ['swell', 'shimmer', 'bloom', 'wave', 'swell', 'shimmer', 'bloom', 'wave'];
   /** Latching hold (MiniLab main encoder push / Enter): everything rings until released. */
   hold = false;
 
@@ -80,7 +81,7 @@ export class InputRouter {
         if (channel === PAD_CHANNEL) {
           const index = (((data1 - 36) % 8) + 8) % 8;
           // MiniLab 3 pads report low velocities (a firm hit measured ~35/127): lift them.
-          bus.emit('pad', { index, gesture: PAD_GESTURES[index % 4], velocity: Math.min(1, Math.sqrt(data2 / 127) * 1.25) });
+          bus.emit('pad', { index, gesture: this.padGestures[index], velocity: Math.min(1, Math.sqrt(data2 / 127) * 1.25) });
         } else {
           // Real playing on MiniLab 3 tops out around 100-105, so ~118 already counts as full.
           this.noteOn(`m${channel}:${data1}`, data1, Math.min(1, Math.pow(data2 / 118, 0.85)), 'midi');

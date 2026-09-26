@@ -131,6 +131,27 @@ button {
   animation: rise 2.4s 0.5s var(--ease) both;
 }
 
+.world-pick {
+  display: flex;
+  gap: 34px;
+  margin-top: 64px;
+  animation: rise 2.4s 0.5s var(--ease) both;
+}
+
+.world-pick .world-name {
+  margin: 0;
+  padding: 6px 0;
+  border-bottom: 1px solid transparent;
+  color: var(--ink-dim);
+  transition: color 0.5s, border-color 0.5s;
+}
+
+.world-pick .world-name.on,
+.world-pick .world-name:hover {
+  color: var(--ink);
+  border-bottom-color: var(--ink-faint);
+}
+
 .intro-actions {
   display: flex;
   gap: 14px;
