@@ -11,6 +11,12 @@ npm run build      # production → dist/
 npm run preview    # проверить dist на http://localhost:4173
 ```
 
+## Quick Launch (Windows)
+
+После установки (`npm install`) ECHOES запускается ярлыком **ECHOES** на рабочем столе: он сам поднимет сервер в фоне (или использует уже запущенный) и откроет сайт в Chrome. Ярлык указывает на `launcher\ECHOES.vbs`.
+
+Остановить сервер: дважды кликнуть `launcher\Stop ECHOES.vbs`. Логи лаунчера лежат в `%LOCALAPPDATA%\ECHOES`.
+
 `dist/` — статический сайт (`base: './'`), его можно выложить на любой статический хостинг. Для Web MIDI нужен Chrome или Edge и `localhost`/HTTPS.
 
 ## Управление
