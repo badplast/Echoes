@@ -100,9 +100,17 @@ export class UI {
       {},
       h('h1.title', {}, 'ECHOES'),
       h('p.subtitle', {}, 'an audiovisual world you can play'),
+      h('p.pick-label', {}, 'choose a world'),
       h('div.world-pick', {}, ...this.buildWorldPicks()),
       h('div.intro-actions', {}, midiBtn, keysBtn),
-      h('p.intro-foot', {}, 'Headphones recommended · sound starts when you enter'),
+      h(
+        'p.intro-foot',
+        {},
+        'No controller needed — play with your computer keys (A S D F…) or a MIDI keyboard in Chrome / Edge.',
+        h('br'),
+        'Headphones recommended · sound starts when you enter',
+      ),
+      h('span.alpha', { title: 'Early public version — things may change' }, 'alpha'),
     );
     this.root.append(this.intro);
   }

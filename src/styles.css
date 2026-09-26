@@ -131,10 +131,31 @@ button {
   animation: rise 2.4s 0.5s var(--ease) both;
 }
 
+.pick-label {
+  margin: 56px 0 0;
+  font-family: var(--serif);
+  font-style: italic;
+  font-size: 14px;
+  color: var(--ink-dim);
+  animation: rise 2.4s 0.45s var(--ease) both;
+}
+
+.alpha {
+  position: absolute;
+  top: 26px;
+  right: 30px;
+  font-size: 9.5px;
+  letter-spacing: 0.4em;
+  text-transform: uppercase;
+  color: var(--ink-faint);
+  border: 1px solid var(--hair);
+  padding: 4px 6px 4px 9px;
+}
+
 .world-pick {
   display: flex;
   gap: 34px;
-  margin-top: 64px;
+  margin-top: 14px;
   animation: rise 2.4s 0.5s var(--ease) both;
 }
 
@@ -192,6 +213,7 @@ button {
 
 .intro-foot {
   margin: 38px 0 0;
+  line-height: 1.9;
   font-size: 11px;
   color: var(--ink-dim);
   letter-spacing: 0.06em;

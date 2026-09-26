@@ -1,5 +1,9 @@
 # ECHOES — an audiovisual world you can play
 
+### ▶ [Play ECHOES](https://badplast.github.io/Echoes/)
+
+**Alpha.** Open it in **Chrome or Edge** (recommended — they support Web MIDI). A MIDI controller is optional: the computer keyboard works too (`A S D F G H J K L`, `Z`/`X` octave, `Space` sustain). Headphones recommended.
+
 **World 01 — TIDE.** Тёмная вода, свет, туман и генеративный ambient. Ноты, velocity, пэды и энкодеры одновременно меняют звук и мир.
 
 ## Запуск
