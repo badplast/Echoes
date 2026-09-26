@@ -2,3 +2,5 @@ node_modules
 dist
 *.log
 .DS_Store
+# local reference media (photos / video of the site)
+IN/

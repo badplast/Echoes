@@ -57,6 +57,12 @@ export class App implements UIHost {
     document.addEventListener('visibilitychange', this.onVisibility);
     this.bindPointer();
     bus.on('pad', (e) => this.generator.pad(e.gesture, e.index, e.velocity));
+    bus.on('master:nudge', (e) => {
+      const v = Math.round(Math.min(1, Math.max(0, this.audio.volume + e.delta)) * 100) / 100;
+      this.audio.setVolume(v);
+      this.ui.syncVolume(v);
+      bus.emit('toast', { text: `VOLUME  ${Math.round(v * 100)}` });
+    });
     bus.on('midi:devices', (e) => {
       if (this.router.learn.applyDeviceSuggestion(e.inputs)) {
         bus.emit('learn:changed', { key: null });

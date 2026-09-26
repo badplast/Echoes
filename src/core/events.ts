@@ -21,7 +21,7 @@ export interface NoteOff {
   note: number;
 }
 
-export type PadGesture = 'swell' | 'shimmer' | 'bloom' | 'gust';
+export type PadGesture = 'swell' | 'shimmer' | 'bloom' | 'wave';
 
 export interface RawMidi {
   device: string;
@@ -43,6 +43,10 @@ export interface AppEvents extends Record<string, unknown> {
   /** bend -1..1, mod 0..1, pressure 0..1 */
   expression: { bend: number; mod: number; pressure: number };
   sustain: { on: boolean };
+  /** Latching hold toggled (MiniLab main encoder push / Enter). */
+  hold: { on: boolean };
+  /** Master volume step from a hardware control (MiniLab main encoder turn). */
+  'master:nudge': { delta: number };
   'midi:raw': RawMidi;
   'midi:devices': { inputs: string[]; active: string; status: MidiStatus };
   /** A macro was moved by hardware/keyboard (for the transient on-screen readout). */

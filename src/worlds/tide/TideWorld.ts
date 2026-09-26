@@ -31,7 +31,7 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 import { bus, type NoteOn, type PadGesture } from '../../core/events';
 import type { Macros } from '../../core/ParameterStore';
-import { echoFeedback, echoTime, lerp, pitchNorm, smooth, timeScale } from '../../core/derive';
+import { echoFeedback, echoTime, fogLevel, lerp, pitchNorm, rainLevel, smooth, timeScale } from '../../core/derive';
 import type { World } from '../World';
 import { createPalette, samplePalette } from './palettes';
 import { createCloudNoise, createWaterDetail } from './noise';
@@ -155,8 +155,17 @@ export class TideWorld implements World {
   private particleOffset = new Vector3();
   private mistOffset = new Vector2();
   private windAngle = -0.4;
+  /** wind gust from pad 4: the target jumps, the gust itself always glides (no visual jerk) */
   private gust = 0;
+  private gustTarget = 0;
   private pressure = 0;
+  /** mod strip, smoothed: shimmer on water, brighter light, a lift of mist */
+  private mod = 0;
+  private modTarget = 0;
+  /** light limiter factor, smoothed so a burst of notes never makes everything flicker */
+  private limitSmooth = 1;
+  /** Diagnostics for smoothness checks: visible events that had to be cut short. */
+  readonly stats = { ripplesCut: 0, ripplesSkipped: 0, orbsCut: 0 };
   /** ~notes in the last two seconds; dense playing gets proportionally softer light */
   private noteRate = 0;
   /** summed echo intensity of the previous frame, for the light limiter */
@@ -207,7 +216,10 @@ export class TideWorld implements World {
       uSunSize: { value: 0.9996 },
       uNight: { value: 0 },
       uCloud: { value: 0.2 },
-      uHaze: { value: 1 },
+      uHazeAmt: { value: 0.8 },
+      uHazeK: { value: 45 },
+      uLandColor: { value: new Color() },
+      uLights: { value: 0 },
       uGlow: { value: 1 },
       uDiscGain: { value: 3 },
       uTime: { value: 0 },
@@ -252,6 +264,8 @@ export class TideWorld implements World {
         uWaterColor: { value: new Color() },
         uAccent: { value: new Color() },
         uMetal: { value: 0.1 },
+        uFoam: { value: 0 },
+        uShimmer: { value: 0 },
       },
     });
     this.water = new Mesh(makeWaterGeometry(256, 3200), waterMat);
@@ -300,6 +314,7 @@ export class TideWorld implements World {
       uJitter: { value: 0.4 },
       uStreak: { value: 1 },
       uTint: { value: new Color() },
+      uShimmer: { value: 0 },
     };
     const pMat = new ShaderMaterial({
       vertexShader: particleVertex,
@@ -354,7 +369,10 @@ export class TideWorld implements World {
       bus.on('note:off', (e) => this.onNoteOff(e.id)),
       bus.on('drip', (e) => this.onDrip(e.note, e.velocity)),
       bus.on('pad', (e) => this.onPad(e.gesture, e.velocity)),
-      bus.on('expression', (e) => (this.pressure = e.pressure)),
+      bus.on('expression', (e) => {
+        this.pressure = e.pressure;
+        this.modTarget = e.mod;
+      }),
     );
   }
 
@@ -395,11 +413,14 @@ export class TideWorld implements World {
       pos.z = e.position.z;
     } else this.notePosition(e.note, pos);
     const vel = e.velocity;
-    const gen = e.source === 'generative';
+    const gen = e.source === 'generative' || e.source === 'pad';
 
     this.noteRate += 1;
-    this.spawnRipple(pos.x, pos.z, e.note, vel * (gen ? 0.7 : 1), 1);
-    this.spawnOrb(e.id, pos.x, pos.z, e.note, vel * (gen ? 0.6 : 1));
+    // Played notes may take over a ripple that is still visible; the world's own notes
+    // (echoes, pads) only use free slots, so a burst never cuts a living ring short.
+    this.spawnRipple(pos.x, pos.z, e.note, vel * (gen ? 0.7 : 1), 1, !gen);
+    this.spawnOrb(e.id, pos.x, pos.z, e.note, vel * (gen ? 0.6 : 1), !gen);
+    if (gen) return;
 
     // Visual echoes land on the same beat as the audio delay repeats, decaying by the same feedback.
     const et = echoTime(m);
@@ -445,16 +466,19 @@ export class TideWorld implements World {
   }
 
   private onPad(gesture: PadGesture, vel: number): void {
-    if (gesture === 'gust') {
-      this.gust = Math.min(1.5, this.gust + 0.6 + vel * 0.8);
+    if (gesture === 'wave') {
+      // A big wave rolls in from out at sea, with a gust of wind that builds and eases.
+      this.gustTarget = Math.min(1.2, this.gustTarget + 0.55 + vel * 0.45);
+      const d = 90;
+      this.spawnRippleRaw(this.camPos.x + this.fwd.x * d, this.camPos.z + this.fwd.z * d, 0.55 + vel * 0.35, 0.32, 4.2, 9, 0.18, this.palette.accent2, 0.25, false);
       return;
     }
     // Other gestures emit notes via the Generator; add one broad swell ring from the centre of view.
     const d = 45;
-    this.spawnRippleRaw(this.camPos.x + this.fwd.x * d, this.camPos.z + this.fwd.z * d, 0.5 * vel + 0.2, 0.55, 3.2, 5, 0.16, this.palette.accent, 0.35);
+    this.spawnRippleRaw(this.camPos.x + this.fwd.x * d, this.camPos.z + this.fwd.z * d, 0.5 * vel + 0.2, 0.55, 3.2, 5, 0.3, this.palette.accent, 0.3, false);
   }
 
-  private spawnRipple(x: number, z: number, note: number, vel: number, scale: number): void {
+  private spawnRipple(x: number, z: number, note: number, vel: number, scale: number, mayReplace: boolean): void {
     const m = this.macros!;
     const pn = pitchNorm(note);
     const k = lerp(0.8, 3.0, pn) * lerp(1, 1.35, m.texture);
@@ -462,9 +486,9 @@ export class TideWorld implements World {
     const width = lerp(3.4, 1.0, pn) * lerp(0.85, 1.3, m.space);
     const decay = lerp(0.2, 0.5, pn) * lerp(1.3, 0.8, m.space);
     const amp = lerp(0.34, 0.13, pn) * Math.pow(vel, 1.15) * scale;
-    const light = lerp(0.25, 0.6, pn) * vel * scale * lerp(1.3, 0.7, m.world) * (1 + this.pressure) * this.density();
+    const light = lerp(0.25, 0.6, pn) * vel * scale * lerp(0.85, 0.65, m.world) * (1 + this.pressure) * this.density();
     const col = this.tmpColor.copy(this.palette.accent).lerp(this.palette.accent2, pn);
-    this.spawnRippleRaw(x, z, amp, k, speed, width, decay, col, light);
+    this.spawnRippleRaw(x, z, amp, k, speed, width, decay, col, light, mayReplace);
   }
 
   private tmpColor = new Color();
@@ -474,7 +498,7 @@ export class TideWorld implements World {
     return 1 / (1 + Math.max(0, this.noteRate - 3) * 0.12);
   }
 
-  private spawnRippleRaw(x: number, z: number, amp: number, k: number, speed: number, width: number, decay: number, col: Color, light: number): void {
+  private spawnRippleRaw(x: number, z: number, amp: number, k: number, speed: number, width: number, decay: number, col: Color, light: number, mayReplace: boolean): void {
     // Reuse the ripple that has faded the most.
     let best = 0;
     let bestLeft = Infinity;
@@ -486,17 +510,28 @@ export class TideWorld implements World {
         best = i;
       }
     }
+    // Low-priority ripples never interrupt a ring that is still visible.
+    if (!mayReplace && bestLeft > 0.012) {
+      this.stats.ripplesSkipped++;
+      return;
+    }
+    if (bestLeft > 0.012) this.stats.ripplesCut++;
     this.ripA[best].set(x, z, this.rtime, amp);
     this.ripB[best].set(k, speed, width, decay);
     this.ripC[best].set(col.r, col.g, col.b, light);
   }
 
-  private spawnOrb(id: string, x: number, z: number, note: number, vel: number): void {
+  private spawnOrb(id: string, x: number, z: number, note: number, vel: number, mayReplace: boolean): void {
     const m = this.macros!;
     let o = this.orbs.find((q) => !q.alive);
     if (!o) {
       o = this.orbs[0];
       for (const q of this.orbs) if (q.intensity < o.intensity) o = q;
+      if (o.intensity > 0.05) {
+        // the world's own notes never snuff out a visible light; played notes may
+        if (!mayReplace) return;
+        this.stats.orbsCut++;
+      }
     }
     const pn = pitchNorm(note);
     o.alive = true;
@@ -523,8 +558,13 @@ export class TideWorld implements World {
     const ts = timeScale(m);
     this.rtime += dt;
     this.wtime += dt * ts;
-    this.gust = Math.max(0, this.gust - dt * 0.3);
+    this.gustTarget = Math.max(0, this.gustTarget - dt * 0.22);
+    this.gust += (this.gustTarget - this.gust) * (1 - Math.exp(-dt / 0.7));
+    this.mod += (this.modTarget - this.mod) * (1 - Math.exp(-dt / 0.2));
     this.noteRate *= Math.exp(-dt / 2);
+    const fog = fogLevel(m);
+    const rain = rainLevel(m);
+    const e = m.energy;
     const U = this.U;
 
     // ---- light & colour: COLOR picks the palette, WORLD the hour
@@ -536,16 +576,25 @@ export class TideWorld implements World {
     const w = m.world;
     const sunI = lerp(0.8, 2.4, smooth(0.2, 0.55, w)) * lerp(1, 0.6, smooth(0.6, 1, m.weather));
     (U.uSunColor.value as Color).copy(P.sun).multiplyScalar(sunI);
+    // Plastun looks east: the moon and the sunrise stand over the open sea, a little left of centre;
+    // as the day climbs the sun moves right, toward the south shore.
     const elev = w < 0.5 ? lerp(0.2, 0.012, smooth(0.0, 0.5, w)) : lerp(0.012, 0.3, smooth(0.5, 1.0, w));
-    const azim = lerp(0.28, 0.12, w);
-    (U.uSunDir.value as Vector3).set(azim, elev, -1).normalize();
+    const az = (w < 0.5 ? lerp(-12, -7, smooth(0, 0.5, w)) : lerp(-7, 14, smooth(0.5, 1, w))) * (Math.PI / 180);
+    (U.uSunDir.value as Vector3).set(Math.sin(az), elev, -Math.cos(az)).normalize();
     // Night: a small crisp moon with a restrained halo. Dawn: a wide warm glow. Day: high and airy.
-    U.uSunSize.value = lerp(0.99994, 0.99975, smooth(0.25, 0.6, w));
-    U.uGlow.value = lerp(0.22, 1, smooth(0.15, 0.5, w)) * lerp(1, 0.75, smooth(0.6, 1, w));
+    U.uSunSize.value = lerp(0.99994, 0.99975, smooth(0.25, 0.6, w)) + smooth(0.7, 1, w) * 0.00009;
+    U.uGlow.value = lerp(0.22, 1, smooth(0.15, 0.5, w)) * lerp(1, 0.45, smooth(0.6, 1, w));
     U.uDiscGain.value = lerp(2.2, 4.5, smooth(0.2, 0.55, w));
     U.uNight.value = 1 - smooth(0.12, 0.45, w);
     U.uCloud.value = smooth(0.12, 0.95, m.weather);
-    U.uHaze.value = lerp(1.1, 0.6, m.weather);
+    // Horizon haze band: dense and wide in fog, thin and clean on a clear day.
+    const clearDay = smooth(0.55, 1, w) * (1 - m.weather);
+    U.uHazeAmt.value = Math.min(1, lerp(0.35, 0.95, fog) * lerp(1, 0.6, clearDay));
+    U.uHazeK.value = lerp(70, 22, fog) * lerp(1, 1.5, clearDay);
+    // Hills: dark forest, a touch of the sky's colour; black silhouettes at night.
+    const landB = lerp(0.006, 0.05, smooth(0.05, 0.9, w));
+    (U.uLandColor.value as Color).setRGB(0.55 * landB, 0.75 * landB, 0.62 * landB).lerp(P.zenith, 0.18);
+    U.uLights.value = (1 - smooth(0.15, 0.42, w)) * lerp(1, 0.55, fog);
     U.uTime.value = this.wtime;
     U.uRTime.value = this.rtime;
 
@@ -553,23 +602,27 @@ export class TideWorld implements World {
     const chaosWob = m.chaos * Math.sin(this.wtime * 0.05) * 0.8;
     this.windAngle = -0.4 + chaosWob + Math.sin(this.wtime * 0.013) * 0.3;
     (U.uWind.value as Vector2).set(Math.sin(this.windAngle), -Math.cos(this.windAngle));
-    U.uSwell.value = lerp(0.05, 0.5, m.energy * 0.45 + m.weather * 0.55) + this.gust * 0.35;
-    this.waveTime += dt * ts * lerp(0.6, 1.2, m.energy);
+    // ENERGY is the sea state: glassy calm -> a real swell with whitecaps.
+    U.uSwell.value = lerp(0.04, 1.15, Math.pow(e, 1.3) * 0.65 + m.weather * 0.35) + this.gust * 0.3;
+    this.waveTime += dt * ts * lerp(0.55, 1.5, e);
     U.uWaveTime.value = this.waveTime;
     const wm = this.water.material as ShaderMaterial;
-    wm.uniforms.uDetail.value = lerp(0.18, 1.05, m.texture) + m.weather * 0.45 + this.gust * 0.5;
-    wm.uniforms.uRain.value = smooth(0.42, 0.95, m.weather) * 0.85;
+    wm.uniforms.uDetail.value = lerp(0.18, 1.05, m.texture) + m.weather * 0.35 + e * 0.55 + this.gust * 0.4;
+    wm.uniforms.uRain.value = rain * 0.85;
+    wm.uniforms.uFoam.value = smooth(0.45, 1, e * 0.75 + m.weather * 0.35 + this.gust * 0.3);
+    wm.uniforms.uShimmer.value = this.mod;
     wm.uniforms.uGloss.value = lerp(1600, 160, Math.pow(m.texture, 0.8));
     wm.uniforms.uMetal.value = lerp(0.18, 0.0, m.texture) * lerp(1, 0.4, m.world);
-    wm.uniforms.uFogDensity.value = lerp(0.0075, 0.0019, m.space) * lerp(0.8, 3.2, Math.pow(m.weather, 1.3)) * lerp(1.15, 1, w);
+    wm.uniforms.uFogDensity.value = lerp(0.0075, 0.0019, m.space) * lerp(0.3, 2.6, fog);
     (wm.uniforms.uWaterColor.value as Color).copy(P.water);
     (wm.uniforms.uAccent.value as Color).copy(P.accent);
 
     // ---- mist: WEATHER thickens, SPACE spreads it, MOTION drifts it
     const wind = U.uWind.value as Vector2;
-    this.mistOffset.x += wind.x * dt * ts * 0.006 * (1 + this.gust * 3);
-    this.mistOffset.y += wind.y * dt * ts * 0.006 * (1 + this.gust * 3);
-    const mistD = lerp(0.05, 0.34, smooth(0.0, 0.85, m.weather)) * lerp(1.2, 0.85, m.space) * (1 + this.gust * 0.4);
+    const mistSpeed = dt * ts * 0.006 * (1 + e * 2 + this.gust * 3);
+    this.mistOffset.x = (this.mistOffset.x + wind.x * mistSpeed) % 64;
+    this.mistOffset.y = (this.mistOffset.y + wind.y * mistSpeed) % 64;
+    const mistD = lerp(0.0, 0.42, smooth(0.1, 0.95, fog)) * lerp(1.2, 0.85, m.space) * (1 + this.gust * 0.4 + this.mod * 0.3) * lerp(0.8, 1.1, m.atmos);
     this.mists.forEach((mesh, i) => {
       const mu = (mesh.material as ShaderMaterial).uniforms;
       mu.uDensity.value = mistD * (1 - i * 0.22);
@@ -580,30 +633,40 @@ export class TideWorld implements World {
 
     // ---- particles: ENERGY density, WEATHER turns motes into drizzle
     const pu = this.particleU;
-    const fall = smooth(0.45, 1, m.weather);
-    this.particleOffset.x += wind.x * dt * ts * (0.3 + m.weather * 3 + this.gust * 6);
-    this.particleOffset.z += wind.y * dt * ts * (0.3 + m.weather * 3 + this.gust * 6);
-    this.particleOffset.y -= dt * (ts * 0.08 + fall * 9);
-    pu.uDensity.value = lerp(0.18, 0.75, m.energy) * lerp(1, 1.3, fall);
-    pu.uJitter.value = lerp(0.2, 1.4, m.chaos) * (1 - fall * 0.8);
+    const fall = smooth(0.2, 1, rain);
+    // Drift is integrated from a smoothed wind speed (never stepped) and wrapped every 4 boxes,
+    // which is seamless for all four particle speed classes.
+    const drift = dt * ts * (0.3 + m.weather * 2.5 + e * 2.5 + this.gust * 4);
+    const box = pu.uBox.value as Vector3;
+    const off = this.particleOffset;
+    off.x = (off.x + wind.x * drift) % (box.x * 4);
+    off.z = (off.z + wind.y * drift) % (box.z * 4);
+    off.y = (off.y - dt * (ts * 0.08 + fall * 9)) % (box.y * 4);
+    pu.uDensity.value = lerp(0.18, 0.8, e) * lerp(1, 1.3, fall) * lerp(0.7, 1.15, m.atmos);
+    pu.uJitter.value = lerp(0.2, 1.4, m.chaos) * (1 - fall * 0.8) * (1 + e * 0.6);
+    pu.uShimmer.value = this.mod;
     pu.uStreak.value = 1 + fall * 5;
     pu.uPixelScale.value = this.height * 0.5;
     (pu.uTint.value as Color).copy(P.accent2).multiplyScalar(lerp(0.35, 0.18, w) * (1 - fall * 0.4));
     (pu.uCenter.value as Vector3).copy(this.camPos);
 
     // ---- camera: very slow drift; SPACE raises and widens
+    // Standing just off the pebble beach at the river mouth, looking out of the bay (-z = bearing 108°):
+    // cape Astasheva at the left edge, open sea ahead, the south shore hills on the right.
+    // The camera only breathes around that spot; it never travels away from it.
     const t = this.wtime * 0.018;
-    const ch = 1 + m.chaos * 0.8;
+    const ch = 1 + m.chaos * 0.6;
+    const bob = Math.sin(this.wtime * lerp(0.35, 0.9, e)) * lerp(0.03, 0.22, e);
     this.camPos.set(
-      Math.sin(t * 0.7) * 10 * ch,
-      lerp(3.3, 5.0, m.space) + Math.sin(t * 1.9) * 0.22 + this.gust * 0.1,
-      Math.cos(t * 0.45) * 7 - this.wtime * 0.12,
+      Math.sin(t * 0.7) * 2.5 * ch,
+      lerp(3.1, 4.6, m.space) + Math.sin(t * 1.9) * 0.18 + bob + this.gust * 0.08,
+      Math.cos(t * 0.45) * 1.8,
     );
-    // Look slightly down: horizon sits a little above centre, the water gets the room.
-    this.camTarget.set(this.camPos.x * 0.4 + Math.sin(t * 0.52) * 4, lerp(-0.4, 0.2, m.space) + Math.sin(t * 1.1) * 0.15, this.camPos.z - 60);
+    const yaw = Math.sin(t * 0.52) * 0.035 * ch;
+    this.camTarget.set(this.camPos.x + Math.sin(yaw) * 60, lerp(-0.6, 0.0, m.space) + Math.sin(t * 1.1) * 0.12, this.camPos.z - Math.cos(yaw) * 60);
     this.camera.position.copy(this.camPos);
     this.camera.lookAt(this.camTarget);
-    const fov = lerp(44, 58, m.space);
+    const fov = lerp(44, 52, m.space);
     if (Math.abs(this.camera.fov - fov) > 0.01) {
       this.camera.fov = fov;
       this.camera.updateProjectionMatrix();
@@ -611,20 +674,22 @@ export class TideWorld implements World {
     this.fwd.copy(this.camTarget).sub(this.camPos).setY(0).normalize();
     this.right.set(-this.fwd.z, 0, this.fwd.x);
     this.sky.position.copy(this.camPos);
-    this.water.position.set(Math.round(this.camPos.x / 8) * 8, 0, Math.round(this.camPos.z / 8) * 8);
+    // the camera stays around the origin, so the water grid stays put (no snapping pops)
 
     // ---- pending visual echoes
     for (const e of this.echoes) {
       if (e.active && this.rtime >= e.at) {
         e.active = false;
-        this.spawnRipple(e.x, e.z, e.note, e.vel, 0.8);
+        this.spawnRipple(e.x, e.z, e.note, e.vel, 0.8, false);
       }
     }
 
     // ---- light echoes: bloom in, hover while held, fade after release.
     // Soft limiter: above a total of ~4 the whole group is scaled down together.
     const LIGHT_BUDGET = 4;
-    const limit = this.lightSum > LIGHT_BUDGET ? LIGHT_BUDGET / this.lightSum : 1;
+    const limitTarget = this.lightSum > LIGHT_BUDGET ? LIGHT_BUDGET / this.lightSum : 1;
+    this.limitSmooth += (limitTarget - this.limitSmooth) * (1 - Math.exp(-dt / 0.35));
+    const limit = this.limitSmooth * (1 + this.mod * 0.35);
     this.lightSum = 0;
     for (let i = 0; i < ORBS; i++) {
       const o = this.orbs[i];
@@ -666,7 +731,7 @@ export class TideWorld implements World {
     this.orbAttrSize.needsUpdate = true;
 
     // ---- post
-    this.bloom.strength = lerp(0.62, 0.42, w) * (1 + this.pressure * 0.3);
+    this.bloom.strength = lerp(0.62, 0.42, w) * (1 + this.pressure * 0.3 + this.mod * 0.25);
     this.bloom.radius = lerp(0.45, 0.7, m.space);
     this.bloom.threshold = lerp(0.88, 0.97, w);
     this.renderer.toneMappingExposure = w < 0.5 ? lerp(1.05, 0.86, smooth(0.2, 0.5, w)) : 0.86;

@@ -60,6 +60,22 @@ MIDI Learn classifies these encoders the same way (see `detectMode` in `src/inpu
 | 7 | 19 | COLOR |
 | 8 | 16 | CHAOS |
 
+| Fader | CC | Mix level |
+|---|---|---|
+| 1 | 82 | ATMOSPHERE — wind, surf, rain, rumble, drips and the world's own echoes (0 = silent bed) |
+| 2 | 83 | RAIN — rain on the water, drizzle, rain hiss and drips, on any sky |
+| 3 | 85 | FOG — sea fog and horizon haze (0 = crystal-clear air) |
+| 4 | 17 | DRONE — level of the root/fifth drone |
+
+| Control | Function |
+|---|---|
+| Main encoder push (CC 115) | HOLD — latching sustain: play, press, everything keeps ringing |
+| Main encoder turn (CC 114) | master volume |
+| Mod strip (CC 1) | expression: shimmer on the water, brighter harmonics and air on held notes, brighter bell, wind and mist lift, gentle vibrato |
+| Pitch strip | pitch bend ±2 semitones (springs back) |
+| Pads 1–4 | swell · shimmer · bloom · wave (a big wave rolling in: deep notes, the wash of the wave, a long ring and a gust) |
+| Pads 5–8 | the same, an octave higher |
+
 Applied automatically when a port named "MiniLab 3" / "Minilab3" appears and the user has not
-learned their own layout. Pads 1–8: swell · shimmer · bloom · gust (5–8 an octave higher).
-Pitch strip → pitch bend ±2 semitones, mod strip → vibrato. Pad pressure is ignored.
+learned their own layout. Faders are absolute (a fader jumps to where it physically sits, gliding
+over 0.12 s). Pad pressure is ignored.

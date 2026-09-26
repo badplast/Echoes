@@ -15,10 +15,9 @@ ${atmosphere}
 varying vec3 vWorld;
 void main() {
   vec3 dir = normalize(vWorld - cameraPosition);
-  vec3 col = skyWithClouds(dir);
-  float c = cloudCover(dir);
-  col += stars(dir) * (1.0 - c);
-  col += luminaryDisc(dir) * (1.0 - c * 0.85);
+  // below the horizon only a sliver past the far edge of the water is visible: give it the horizon
+  vec3 col = dir.y < 0.0 ? horizonTarget(dir) : scene(dir, true);
+  col = applyHaze(col, dir);
   gl_FragColor = vec4(col, 1.0);
 }
 `;

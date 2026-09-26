@@ -29,13 +29,14 @@ npm run preview    # проверить dist на http://localhost:4173
 | `Space` | sustain |
 | `1`–`8`, затем `↑` `↓` | выбрать макропараметр и крутить его |
 | клик / перетаскивание по воде | ноты мышью (X → высота, Y → сила) |
+| `Enter` | HOLD — всё продолжает звучать, пока не нажмёте снова |
 | `Tab` | панель управления |
 | `` ` `` | MIDI-монитор |
 | `Esc` | закрыть панель |
 
-MIDI: Note On/Off + velocity, CC (через MIDI Learn), CC64 sustain, CC1 vibrato, pitch bend, aftertouch (channel/poly), пэды на канале 10 (swell · shimmer · bloom · gust).
+MIDI: Note On/Off + velocity, CC (через MIDI Learn), CC64 sustain, CC1 выразительность (mod), pitch bend, channel aftertouch, пэды на канале 10 (swell · shimmer · bloom · wave).
 
-**Arturia MiniLab 3** подхватывается автоматически: энкодеры 1–8 → WORLD … CHAOS (бесконечный режим, без прыжков). Реально измеренный профиль контроллера — [docs/MINILAB3.md](docs/MINILAB3.md).
+**Arturia MiniLab 3** подхватывается автоматически: энкодеры 1–8 → WORLD … CHAOS (бесконечный режим, без прыжков), фейдеры 1–4 → Atmosphere · Rain · Fog · Drone, главный энкодер: нажатие — HOLD, вращение — громкость, mod-полоса — выразительность (мерцание воды, яркость гармоник, ветер). Реально измеренный профиль контроллера — [docs/MINILAB3.md](docs/MINILAB3.md).
 
 **MIDI Learn:** в панели нажать `LEARN` возле параметра → покрутить энкодер. Относительные энкодеры распознаются автоматически. Правый клик по `LEARN` — снять привязку.
 

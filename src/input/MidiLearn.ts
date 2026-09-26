@@ -1,5 +1,5 @@
 import { bus } from '../core/events';
-import { MACROS, type MacroKey } from '../core/ParameterStore';
+import { MACROS, PARAMS, type ParamKey } from '../core/ParameterStore';
 import { load, save } from '../core/storage';
 
 /**
@@ -20,7 +20,7 @@ export interface CCMapping {
   suggested?: boolean;
 }
 
-export type MappingTable = Partial<Record<MacroKey, CCMapping>>;
+export type MappingTable = Partial<Record<ParamKey, CCMapping>>;
 
 /**
  * Arturia MiniLab 3, measured on a real unit (factory "User" preset, see docs/MINILAB3.md).
@@ -32,9 +32,20 @@ export const MINILAB3 = {
   encoders: [74, 71, 76, 77, 93, 18, 19, 16],
   /** Second encoder layer seen on the same unit (not mapped by default). */
   altEncoders: [86, 87, 89],
+  /** Faders 1-4: absolute 0..127 positions. */
+  faders: [82, 83, 85, 17],
+  /** Main (black, clickable) encoder: relative turn 64±n, push 127/0. */
+  mainTurn: 114,
+  mainPush: 115,
 };
 
-const MINILAB3_DEFAULT: [MacroKey, number][] = MACROS.map((k, i) => [k, MINILAB3.encoders[i]]);
+const MINILAB3_DEFAULT: [ParamKey, number, CCMode][] = [
+  ...MACROS.map((k, i): [ParamKey, number, CCMode] => [k, MINILAB3.encoders[i], 'delta']),
+  ['atmos', MINILAB3.faders[0], 'abs'],
+  ['rain', MINILAB3.faders[1], 'abs'],
+  ['fog', MINILAB3.faders[2], 'abs'],
+  ['drone', MINILAB3.faders[3], 'abs'],
+];
 
 const isMiniLabEncoder = (device: string, cc: number) =>
   MINILAB3.match(device) && (MINILAB3.encoders.includes(cc) || MINILAB3.altEncoders.includes(cc));
@@ -45,33 +56,33 @@ const isMiniLabEncoder = (device: string, cc: number) =>
  */
 export class MidiLearn {
   mappings: MappingTable = load<MappingTable>('midiMappings', {});
-  armed: MacroKey | null = null;
-  private probe: { key: MacroKey; channel: number; cc: number; values: number[]; timer: number } | null = null;
+  armed: ParamKey | null = null;
+  private probe: { key: ParamKey; channel: number; cc: number; values: number[]; timer: number } | null = null;
 
   hasUserMappings(): boolean {
-    return MACROS.some((k) => this.mappings[k] && !this.mappings[k]!.suggested);
+    return PARAMS.some((k) => this.mappings[k] && !this.mappings[k]!.suggested);
   }
 
   /** Installs (or refreshes) the MiniLab 3 profile unless the user has learned their own layout. */
   applyDeviceSuggestion(deviceNames: string[]): boolean {
     if (this.hasUserMappings()) return false;
     if (!deviceNames.some(MINILAB3.match)) return false;
-    const upToDate = MINILAB3_DEFAULT.every(([k, cc]) => {
+    const upToDate = MINILAB3_DEFAULT.every(([k, cc, mode]) => {
       const m = this.mappings[k];
-      return m && m.cc === cc && m.mode === 'delta';
+      return m && m.cc === cc && m.mode === mode;
     });
     if (upToDate) return false;
-    for (const [key, cc] of MINILAB3_DEFAULT) this.mappings[key] = { channel: 0, cc, mode: 'delta', suggested: true };
+    for (const [key, cc, mode] of MINILAB3_DEFAULT) this.mappings[key] = { channel: 0, cc, mode, suggested: true };
     this.persist();
     return true;
   }
 
-  arm(key: MacroKey | null): void {
+  arm(key: ParamKey | null): void {
     this.armed = this.armed === key ? null : key;
     bus.emit('learn:changed', { key: this.armed });
   }
 
-  clear(key: MacroKey): void {
+  clear(key: ParamKey): void {
     delete this.mappings[key];
     this.persist();
     bus.emit('learn:changed', { key: this.armed });
@@ -93,7 +104,7 @@ export class MidiLearn {
     // Never learn the sustain pedal or mod wheel: they have fixed musical roles.
     if (cc === 64 || cc === 1) return false;
     const key = this.armed;
-    for (const k of MACROS) {
+    for (const k of PARAMS) {
       const m = this.mappings[k];
       if (m && m.cc === cc && (m.channel === channel || m.channel === 0)) delete this.mappings[k];
     }
@@ -107,15 +118,15 @@ export class MidiLearn {
     return true;
   }
 
-  find(channel: number, cc: number): { key: MacroKey; mapping: CCMapping } | null {
-    for (const k of MACROS) {
+  find(channel: number, cc: number): { key: ParamKey; mapping: CCMapping } | null {
+    for (const k of PARAMS) {
       const m = this.mappings[k];
       if (m && m.cc === cc && (m.channel === channel || m.channel === 0)) return { key: k, mapping: m };
     }
     return null;
   }
 
-  label(key: MacroKey): string {
+  label(key: ParamKey): string {
     const m = this.mappings[key];
     if (!m) return '';
     return `CC${m.cc}${m.mode === 'rel64' || m.mode === 'rel2c' ? ' rel' : ''}`;

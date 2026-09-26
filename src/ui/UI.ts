@@ -1,5 +1,5 @@
 import { bus, type RawMidi } from '../core/events';
-import { MACROS, MACRO_INFO, type MacroKey, type ParameterStore } from '../core/ParameterStore';
+import { FADERS, MACROS, MACRO_INFO, type ParamKey, type ParameterStore } from '../core/ParameterStore';
 import { NOTE_NAMES, SCALES, noteName } from '../core/scales';
 import { load, save } from '../core/storage';
 import type { AudioEngine } from '../audio/AudioEngine';
@@ -35,8 +35,10 @@ export class UI {
   private readout = h('div.readout');
   private audioNotice = h('button.audio-notice', { type: 'button' });
   private statusEl = h('span.status');
+  private holdEl = h('span.hold', {}, 'hold');
+  private volInput: HTMLInputElement | null = null;
   private hintEl = h('div.hint');
-  private sliders = new Map<MacroKey, { input: HTMLInputElement; value: HTMLElement; learn: HTMLButtonElement; row: HTMLElement }>();
+  private sliders = new Map<ParamKey, { input: HTMLInputElement; value: HTMLElement; learn: HTMLButtonElement; row: HTMLElement }>();
   private deviceSelect = h('select.select', { 'aria-label': 'MIDI device' });
   private midiNote = h('p.panel-note');
   private connectBtn!: HTMLButtonElement;
@@ -62,7 +64,8 @@ export class UI {
     this.audioNotice.addEventListener('click', () => void this.host.audio.resume().then(() => this.refreshAudio()));
 
     bus.on('toast', (e) => this.toast(e.text));
-    bus.on('param:touched', (e) => this.showReadout(e.key as MacroKey, e.value));
+    bus.on('hold', (e) => this.holdEl.classList.toggle('on', e.on));
+    bus.on('param:touched', (e) => this.showReadout(e.key as ParamKey, e.value));
     bus.on('learn:changed', () => this.refreshLearn());
     bus.on('midi:devices', () => this.refreshDevices());
     bus.on('midi:raw', (m) => this.logMidi(m));
@@ -121,7 +124,7 @@ export class UI {
       'div.hud',
       {},
       h('div.hud-mark', {}, h('span.mark-title', {}, 'ECHOES'), h('span.mark-world', {}, 'TIDE')),
-      h('div.hud-status', {}, this.statusEl),
+      h('div.hud-status', {}, this.statusEl, this.holdEl),
       h('div.hud-actions', {}, fsBtn, ctlBtn),
       this.hintEl,
     );
@@ -171,7 +174,7 @@ export class UI {
   private buildPanel(): void {
     const { params, router, audio } = this.host;
 
-    const rows = MACROS.map((key, i) => {
+    const makeRow = (key: ParamKey, index: string) => {
       const info = MACRO_INFO[key];
       const input = h('input.slider', { type: 'range', min: 0, max: 1, step: 0.001, value: params.target[key], 'aria-label': info.label });
       const value = h('span.macro-value');
@@ -185,14 +188,16 @@ export class UI {
       const row = h(
         'div.macro',
         {},
-        h('div.macro-head', {}, h('span.macro-index', {}, String(i + 1)), h('span.macro-label', {}, info.label), value, learn),
+        h('div.macro-head', {}, h('span.macro-index', {}, index), h('span.macro-label', {}, info.label), value, learn),
         input,
         h('div.macro-range', {}, h('span', {}, info.lo), h('span', {}, info.hi)),
       );
       this.sliders.set(key, { input, value, learn, row });
       this.syncSlider(key, params.target[key]);
       return row;
-    });
+    };
+    const rows = MACROS.map((key, i) => makeRow(key, String(i + 1)));
+    const faderRows = FADERS.map((key, i) => makeRow(key, `F${i + 1}`));
 
     const scaleSel = h('select.select', { 'aria-label': 'Scale' }, ...SCALES.map((s) => h('option', { value: s.id }, s.label)));
     scaleSel.value = router.scale.scale.id;
@@ -206,6 +211,7 @@ export class UI {
 
     const vol = h('input.slider', { type: 'range', min: 0, max: 1, step: 0.01, value: audio.volume, 'aria-label': 'Master volume' });
     vol.addEventListener('input', () => audio.setVolume(Number(vol.value)));
+    this.volInput = vol;
     this.muteBtn = h('button.chip', { type: 'button', onclick: () => this.setMuted(!this.host.audio.muted) }, audio.muted ? 'Unmute' : 'Mute');
     this.debugBtn = h('button.chip', { type: 'button', onclick: () => this.setDebug(!this.debugOn) }, 'MIDI monitor');
     this.connectBtn = h('button.chip', { type: 'button', onclick: () => void this.host.connectMidi() }, 'Connect MIDI');
@@ -217,6 +223,7 @@ export class UI {
       h('header.panel-head', {}, h('span', {}, 'Controls'), h('button.close', { type: 'button', 'aria-label': 'Close', onclick: () => this.togglePanel(false) }, '×')),
       h('section.panel-sec', {}, h('h3', {}, 'Input'), h('div.row', {}, this.deviceSelect, this.connectBtn), this.midiNote),
       h('section.panel-sec.macros', {}, h('h3', {}, 'World'), ...rows),
+      h('section.panel-sec.macros', {}, h('h3', {}, 'Mix'), ...faderRows),
       h(
         'section.panel-sec',
         {},
@@ -236,7 +243,7 @@ export class UI {
           h('button.chip', { type: 'button', onclick: () => { this.host.router.learn.clearAll(); this.toast('MIDI mappings cleared'); } }, 'Clear mappings'),
           h('button.chip', { type: 'button', onclick: () => this.host.params.reset() }, 'Reset world'),
         ),
-        h('p.panel-note', {}, 'Learn: press LEARN, then turn a knob. Right-click LEARN to unmap. Tab toggles this panel, ` toggles the MIDI monitor.'),
+        h('p.panel-note', {}, 'Learn: press LEARN, then move a knob or fader. Right-click LEARN to unmap. Enter (or the MiniLab main encoder push) toggles HOLD. Tab toggles this panel, ` the MIDI monitor.'),
       ),
     );
     this.root.append(this.panel);
@@ -256,7 +263,7 @@ export class UI {
     this.refreshAudio();
   }
 
-  private syncSlider(key: MacroKey, v: number): void {
+  private syncSlider(key: ParamKey, v: number): void {
     const s = this.sliders.get(key);
     if (!s) return;
     if (document.activeElement !== s.input) s.input.value = String(v);
@@ -380,7 +387,7 @@ export class UI {
     this.toastTimer = window.setTimeout(() => this.toastEl.classList.remove('show'), 1800);
   }
 
-  private showReadout(key: MacroKey, v: number): void {
+  private showReadout(key: ParamKey, v: number): void {
     if (this.panelOpen) return;
     const info = MACRO_INFO[key];
     const val = key === 'color' ? paletteName(v) : v.toFixed(2);
@@ -392,6 +399,11 @@ export class UI {
     this.readout.classList.add('show');
     clearTimeout(this.readoutTimer);
     this.readoutTimer = window.setTimeout(() => this.readout.classList.remove('show'), 1400);
+  }
+
+  /** Keep the volume slider in step with hardware changes (MiniLab main encoder). */
+  syncVolume(v: number): void {
+    if (this.volInput && document.activeElement !== this.volInput) this.volInput.value = String(v);
   }
 
   isPanelOpen(): boolean {

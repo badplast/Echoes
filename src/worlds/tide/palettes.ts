@@ -18,13 +18,13 @@ interface PaletteDef {
 }
 
 const DEFS: PaletteDef[] = [
-  { name: 'Midnight Blue', zenith: '#0a1633', horizon: '#46618f', sun: '#c4d8ff', fog: '#26395a', water: '#050c1a', accent: '#6f9dff', accent2: '#cfe2ff' },
-  { name: 'Deep Teal', zenith: '#052226', horizon: '#3d8583', sun: '#dcfff3', fog: '#1d4c4d', water: '#021416', accent: '#3fd6bd', accent2: '#c2fff1' },
-  { name: 'Violet Mist', zenith: '#140c2c', horizon: '#76659f', sun: '#f3dcff', fog: '#3d315f', water: '#0a0716', accent: '#a483ff', accent2: '#f3d0ff' },
-  { name: 'Cold Cyan', zenith: '#071d30', horizon: '#6cb8d0', sun: '#eeffff', fog: '#2c6a84', water: '#03121d', accent: '#63dcff', accent2: '#e2fbff' },
-  { name: 'Warm Dawn', zenith: '#191833', horizon: '#e39a73', sun: '#ffd9ac', fog: '#5b4556', water: '#0d0a14', accent: '#ffa878', accent2: '#ffe6c4' },
-  { name: 'Pale Rose', zenith: '#241629', horizon: '#dba7ad', sun: '#ffe8e6', fog: '#6a5060', water: '#110a12', accent: '#ff9bb3', accent2: '#ffe3ec' },
-  { name: 'Amber Horizon', zenith: '#171006', horizon: '#dc8e3e', sun: '#ffd48f', fog: '#57391f', water: '#0a0703', accent: '#ffae4a', accent2: '#ffe9b8' },
+  // One natural axis, cold -> warm: the sky over the Sea of Japan from blue hour to the last ember.
+  // Zeniths stay a muted blue in all of them; horizon, light and water carry the change.
+  { name: 'Blue Hour', zenith: '#0e1d3a', horizon: '#5b7ea6', sun: '#d4e2ff', fog: '#3a5172', water: '#07111e', accent: '#80b0f5', accent2: '#d6e6ff' },
+  { name: 'Steel', zenith: '#26313f', horizon: '#98a4ae', sun: '#eef0ea', fog: '#66727d', water: '#101820', accent: '#a8c2d8', accent2: '#eef3f7' },
+  { name: 'Pearl', zenith: '#262b42', horizon: '#c4b6ae', sun: '#fff0dc', fog: '#766f7a', water: '#12121a', accent: '#d6c2b2', accent2: '#fff1e4' },
+  { name: 'Sunset', zenith: '#212747', horizon: '#e39a5e', sun: '#ffd29a', fog: '#80604f', water: '#130f13', accent: '#ffb072', accent2: '#ffe2bd' },
+  { name: 'Ember', zenith: '#1a1a33', horizon: '#d35a3c', sun: '#ffb070', fog: '#673a31', water: '#0e0a0c', accent: '#ff8c56', accent2: '#ffd2a4' },
 ];
 
 export const PALETTE_NAMES = DEFS.map((d) => d.name);
@@ -72,7 +72,11 @@ function timeOfDay(c: Color, key: Key, world: number, out: Color): Color {
     const wash = key === 'water' ? 0.08 : key === 'zenith' ? 0.12 : key === 'accent' || key === 'accent2' ? 0.1 : 0.22;
     const gain = key === 'water' ? 1.9 : key === 'zenith' ? 2.4 : key === 'sun' ? 1.0 : key === 'fog' ? 1.15 : 0.95;
     tmpB.copy(c).lerp(DAY_WASH, wash).multiplyScalar(gain);
-    if (key === 'zenith') tmpB.lerp(tmpA.setRGB(0.07, 0.16, 0.34), 0.45);
+    // a clear day is blue overhead and pale blue at the horizon, whatever the palette's accent
+    if (key === 'zenith') tmpB.lerp(tmpA.setRGB(0.07, 0.19, 0.46), 0.72);
+    if (key === 'horizon') tmpB.lerp(tmpA.setRGB(0.5, 0.62, 0.78), 0.4);
+    if (key === 'fog') tmpB.lerp(tmpA.setRGB(0.42, 0.52, 0.64), 0.45);
+    if (key === 'water') tmpB.lerp(tmpA.setRGB(0.03, 0.07, 0.12), 0.5);
     out.lerp(tmpB, day);
   }
   return out;

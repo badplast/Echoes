@@ -1,7 +1,7 @@
-import { bus, type PadGesture } from './events';
+import { bus, type NoteSource, type PadGesture } from './events';
 import type { Macros } from './ParameterStore';
 import type { ScaleLock } from './scales';
-import { eventInterval, lerp, smooth } from './derive';
+import { eventInterval, lerp, rainLevel, smooth } from './derive';
 
 interface Scheduled {
   at: number;
@@ -53,7 +53,7 @@ export class Generator {
       this.nextEcho = now + Math.max(0.8, interval) + quiet;
     }
 
-    const dripRate = smooth(0.18, 1, m.weather) * 7 + m.texture * m.weather * 3;
+    const dripRate = rainLevel(m) * 8 + smooth(0.15, 0.5, m.weather) * 1.5 + m.texture * m.weather * 2;
     if (dripRate > 0.05 && now >= this.nextDrip) {
       this.drip();
       this.nextDrip = now + (-Math.log(1 - Math.random()) / dripRate);
@@ -69,13 +69,13 @@ export class Generator {
     switch (gesture) {
       case 'swell': {
         const base = root + 36 + lift;
-        [0, 7, 12, 19].forEach((iv, i) => this.play(this.scale.quantize(base + iv), v * (1 - i * 0.12), 5.5, i * 0.09));
+        [0, 7, 12, 19].forEach((iv, i) => this.play(this.scale.quantize(base + iv), v * (1 - i * 0.12), 5.5, i * 0.09, 'pad'));
         break;
       }
       case 'shimmer': {
         let n = this.scale.quantize(root + 72 + lift);
         for (let i = 0; i < 7; i++) {
-          this.play(n, v * 0.55 * (1 - i * 0.08), 1.6, i * 0.13 + Math.random() * 0.03);
+          this.play(n, v * 0.55 * (1 - i * 0.08), 1.6, i * 0.13 + Math.random() * 0.03, 'pad');
           n = this.scale.step(n, Math.random() < 0.8 ? 1 : 2);
         }
         break;
@@ -83,14 +83,20 @@ export class Generator {
       case 'bloom': {
         let n = this.scale.quantize(root + 48 + lift);
         for (let i = 0; i < 5; i++) {
-          this.play(n, v * 0.7, 4.5, i * 0.035);
+          this.play(n, v * 0.7, 4.5, i * 0.035, 'pad');
           n = this.scale.step(n, 2);
         }
         break;
       }
-      case 'gust':
-        // Pure world gesture: handled by audio (wind) and TIDE (surface + fog).
+      case 'wave': {
+        // A big wave rolling in: a deep root with a distant fifth above; audio adds the wash of
+        // the wave, TIDE the long swell and the gust of wind that comes with it.
+        const deep = this.scale.quantize(root + 24 + lift);
+        this.play(deep, v * 0.9, 4.5, 0, 'pad');
+        this.play(this.scale.quantize(deep + 7), v * 0.45, 3.5, 0.35, 'pad');
+        this.play(this.scale.quantize(deep + 24), v * 0.3, 2.5, 0.9, 'pad');
         break;
+      }
     }
   }
 
@@ -125,10 +131,10 @@ export class Generator {
     bus.emit('drip', { note: n, velocity: 0.2 + Math.random() * 0.6 });
   }
 
-  private play(note: number, velocity: number, duration: number, delay: number): void {
+  private play(note: number, velocity: number, duration: number, delay: number, source: NoteSource = 'generative'): void {
     const id = `g${++this.counter}`;
     const start = () => {
-      bus.emit('note:on', { id, note, rawNote: note, velocity, source: 'generative' });
+      bus.emit('note:on', { id, note, rawNote: note, velocity, source });
       this.queue.push({ at: this.now + duration, fn: () => bus.emit('note:off', { id, note }) });
     };
     if (delay <= 0) start();

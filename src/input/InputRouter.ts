@@ -2,7 +2,7 @@ import { bus, type NoteSource, type PadGesture, type RawMidi } from '../core/eve
 import { MACROS, MACRO_INFO, type MacroKey, type ParameterStore } from '../core/ParameterStore';
 import { ScaleLock } from '../core/scales';
 import { load, save } from '../core/storage';
-import { MidiLearn, relativeDelta } from './MidiLearn';
+import { MINILAB3, MidiLearn, relativeDelta } from './MidiLearn';
 
 /** Physical key positions (event.code), so any layout (EN, RU, ...) plays the same notes. */
 const KEY_TO_SEMITONE: Record<string, number> = {
@@ -10,7 +10,7 @@ const KEY_TO_SEMITONE: Record<string, number> = {
   KeyU: 10, KeyJ: 11, KeyK: 12, KeyO: 13, KeyL: 14, KeyP: 15, Semicolon: 16, Quote: 17, BracketRight: 18,
 };
 
-const PAD_GESTURES: PadGesture[] = ['swell', 'shimmer', 'bloom', 'gust'];
+const PAD_GESTURES: PadGesture[] = ['swell', 'shimmer', 'bloom', 'wave'];
 /** General MIDI convention: channel 10 is percussion, which is where MiniLab 3 pads live by default. */
 const PAD_CHANNEL = 10;
 
@@ -32,6 +32,8 @@ export class InputRouter {
   private lastCC = new Map<string, number>();
   private sustainKey = false;
   private sustainPedal = false;
+  /** Latching hold (MiniLab main encoder push / Enter): everything rings until released. */
+  hold = false;
 
   constructor(private params: ParameterStore) {
     this.scale = new ScaleLock(load('scale', 'minor-pentatonic'), load('root', 2));
@@ -134,6 +136,17 @@ export class InputRouter {
       bus.emit('param:touched', { key, value: this.params.target[key] });
       return;
     }
+    // MiniLab 3 main encoder: push = HOLD, turn = master volume (unless the user learned it).
+    if (MINILAB3.match(device)) {
+      if (cc === MINILAB3.mainPush) {
+        if (value >= 64) this.toggleHold();
+        return;
+      }
+      if (cc === MINILAB3.mainTurn) {
+        if (value !== 64) bus.emit('master:nudge', { delta: relativeDelta('rel64', value) * 0.025 });
+        return;
+      }
+    }
     if (cc === 64) {
       this.sustainPedal = value >= 64;
       this.emitSustain();
@@ -150,7 +163,14 @@ export class InputRouter {
   }
 
   private emitSustain(): void {
-    bus.emit('sustain', { on: this.sustainKey || this.sustainPedal });
+    bus.emit('sustain', { on: this.sustainKey || this.sustainPedal || this.hold });
+  }
+
+  toggleHold(): void {
+    this.hold = !this.hold;
+    this.emitSustain();
+    bus.emit('hold', { on: this.hold });
+    bus.emit('toast', { text: this.hold ? 'HOLD — everything rings' : 'HOLD released' });
   }
 
   // ---------------------------------------------------------------- computer keyboard
@@ -181,6 +201,9 @@ export class InputRouter {
       case 'Space':
         this.sustainKey = true;
         this.emitSustain();
+        return true;
+      case 'Enter':
+        this.toggleHold();
         return true;
       case 'ArrowUp':
       case 'ArrowDown': {

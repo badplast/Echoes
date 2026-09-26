@@ -1,4 +1,4 @@
-import { atmosphere, orbChunk, RIPPLES } from './common';
+import { atmosphere, NOTE_RIPPLES, orbChunk, RIPPLES } from './common';
 
 /* ---------------------------------------------------------------- mist sheets */
 
@@ -35,7 +35,7 @@ void main() {
   // notes locally stir the mist: it thickens and glows where a ripple was born
   float stir = 0.0;
   vec3 stirCol = vec3(0.0);
-  for (int i = 0; i < 24; i++) {
+  for (int i = 0; i < ${NOTE_RIPPLES}; i++) {
     vec4 A = uRipA[i];
     if (A.w <= 0.0) continue;
     float age = uRTime - A.z;
@@ -63,7 +63,7 @@ void main() {
   vec3 V = toP / dist;
   // never show a sheet edge-on: fade where the view grazes the layer
   a *= smoothstep(0.015, 0.09, abs(V.y));
-  vec3 col = mix(uFogColor, skyGradient(normalize(vec3(V.x, 0.03, V.z))), 0.55);
+  vec3 col = mix(uFogColor, horizonTarget(V), 0.55);
   col += lit + stirCol * 0.12;
   gl_FragColor = vec4(col, clamp(a, 0.0, 0.6));
 }
@@ -86,12 +86,16 @@ uniform float uPixelScale;
 uniform float uJitter;
 uniform float uStreak;
 uniform vec3 uTint;
+uniform float uShimmer;
 attribute vec4 aSeed;
 varying vec3 vColor;
 varying float vAlpha;
 
 void main() {
-  vec3 local = fract(aSeed.xyz + (uOffset * (0.6 + aSeed.w * 0.8) - vec3(uCenter.x, 0.0, uCenter.z)) / uBox);
+  // four speed classes (2/4 .. 5/4): the CPU wraps uOffset every 4 boxes, which is then
+  // seamless for every class, so the drift stays smooth and precise however long it runs
+  float speed = (2.0 + floor(fract(aSeed.w * 3.71) * 4.0)) * 0.25;
+  vec3 local = fract(aSeed.xyz + (uOffset * speed - vec3(uCenter.x, 0.0, uCenter.z)) / uBox);
   vec3 wp = vec3(uCenter.x + (local.x - 0.5) * uBox.x, 0.15 + local.y * uBox.y, uCenter.z + (local.z - 0.5) * uBox.z);
   float ph = aSeed.w * 6.2831;
   wp += vec3(sin(uTime * 0.31 + ph), sin(uTime * 0.23 + ph * 1.7) * 0.5, cos(uTime * 0.27 + ph)) * uJitter;
@@ -105,33 +109,34 @@ void main() {
     vec3 d = wp - O.xyz;
     float r2 = dot(d, d);
     float s = O.w * O.w;
-    wp += normalize(d + 1e-4) * C.a * 1.6 * exp(-r2 / (s * 10.0));
+    wp += normalize(d + 1e-4) * C.a * 0.8 * exp(-r2 / (s * 10.0));
     float l = C.a * exp(-r2 / (s * 22.0));
     glow += l;
     lightCol += C.rgb * l;
   }
   // passing ripples lift the motes that hover low above the water
-  for (int i = 0; i < 24; i++) {
+  for (int i = 0; i < ${NOTE_RIPPLES}; i++) {
     vec4 A = uRipA[i];
     if (A.w <= 0.0) continue;
     float age = uRTime - A.z;
     if (age < 0.0 || age > 10.0) continue;
     vec4 B = uRipB[i];
     float x = length(wp.xz - A.xy) - B.y * age;
-    wp.y += A.w * 3.0 * exp(-x * x / (B.z * B.z * 4.0)) * exp(-age * B.w) * exp(-wp.y * 0.25);
+    wp.y += A.w * 2.0 * min(age * 3.0, 1.0) * exp(-x * x / (B.z * B.z * 4.0)) * exp(-age * B.w) * exp(-wp.y * 0.25);
   }
 
   vec4 mv = viewMatrix * vec4(wp, 1.0);
   gl_Position = projectionMatrix * mv;
-  float visible = step(aSeed.w, uDensity);
+  // fade in/out around the density threshold instead of popping
+  float visible = clamp((uDensity - aSeed.w) / 0.08, 0.0, 1.0);
   float edge = min(min(local.x, 1.0 - local.x), min(local.z, 1.0 - local.z));
   float dist = -mv.z;
   vAlpha = visible * smoothstep(0.0, 0.08, edge) * smoothstep(2.0, 7.0, dist) * (0.35 + 0.65 * fract(aSeed.w * 7.13));
   vAlpha *= 0.55 + 0.45 * sin(uTime * (0.6 + aSeed.w) + ph * 3.0);
-  vColor = uTint * (0.5 + glow * 0.3) + lightCol * 1.2;
+  vColor = uTint * (0.5 + glow * 0.3 + uShimmer * 0.5) + lightCol * 1.2;
   float size = (0.6 + fract(aSeed.w * 13.7) * 1.1) * (1.0 + glow * 0.8) * (1.0 + (uStreak - 1.0) * 0.5);
   gl_PointSize = clamp(size * uPixelScale / dist, 0.0, 28.0);
-  if (visible < 0.5) gl_PointSize = 0.0;
+  if (visible <= 0.0) gl_PointSize = 0.0;
 }
 `;
 

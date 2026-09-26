@@ -29,6 +29,8 @@ uniform float uFogDensity;
 uniform vec3 uWaterColor;
 uniform vec3 uAccent;
 uniform float uMetal;
+uniform float uFoam;     // whitecaps (ENERGY + WEATHER)
+uniform float uShimmer;  // mod strip: brighter glitter, livelier surface
 varying vec3 vWorld;
 
 vec2 detailGrad(vec2 p) {
@@ -73,7 +75,8 @@ void main() {
   vec3 rp = ripples(p, ringLight);
   float fade = exp(-dist * 0.011);
   vec2 g = sw.yz + rp.yz;
-  g += detailGrad(p) * uDetail * (0.25 + 0.75 * fade);
+  vec2 dg = detailGrad(p);
+  g += dg * uDetail * (0.25 + 0.75 * fade) * (1.0 + uShimmer * 0.35);
   if (uRain > 0.001) g += rainGrad(p, uTime * 1.3) * uRain * exp(-dist * 0.06);
   vec3 N = normalize(vec3(-g.x, 1.0, -g.y));
   N = normalize(mix(N, vec3(0.0, 1.0, 0.0), smoothstep(120.0, 900.0, dist) * 0.8));
@@ -84,10 +87,11 @@ void main() {
   float fres = 0.025 + 0.975 * pow(1.0 - ndv, 5.0);
   fres = mix(fres, 0.55 + 0.45 * fres, uMetal);
 
-  vec3 refl = skyWithClouds(R) * 0.82;
+  // reflections include the shores and their lights, distorted by the waves
+  vec3 refl = scene(R, false) * 0.82;
   float sdot = max(dot(R, uSunDir), 0.0);
   // energy-capped glitter: a mirror-smooth surface must not feed the bloom a white-hot sheet
-  vec3 spec = uSunColor * (pow(sdot, uGloss) * min(uGloss * 0.006, 3.2) + pow(sdot, uGloss * 0.08) * 0.3);
+  vec3 spec = uSunColor * (pow(sdot, uGloss) * min(uGloss * 0.006, 3.2) + pow(sdot, uGloss * 0.08) * 0.3) * (1.0 + uShimmer * 0.9);
 
   // body of the water: deep colour, lifted on crests and by the light above it
   float crest = clamp(sw.x * 0.6 + rp.x * 1.5, -1.0, 1.0);
@@ -95,6 +99,19 @@ void main() {
   body += uFogColor * 0.06;
 
   vec3 col = mix(body, refl, fres) + spec * (0.3 + 0.7 * fres);
+
+  // whitecaps: foam breaking on the steepest crests when the sea gets up
+  if (uFoam > 0.001) {
+    float crestN = sw.x / max(uSwell, 0.05);
+    // streaks stretched along the wind, broken up by two noise octaves
+    vec2 along = vec2(dot(p, uWind), dot(p, vec2(-uWind.y, uWind.x)));
+    float breakup = texture2D(uDetailTex, along * vec2(0.03, 0.11) + uWaveTime * 0.02).x * 0.6
+                  + texture2D(uDetailTex, along * vec2(0.09, 0.3) - uWaveTime * 0.03).y * 0.4;
+    float foam = smoothstep(0.78, 1.12, crestN * 0.62 + breakup * 0.5) * uFoam * fade;
+    float sky = dot(skyGradient(vec3(0.0, 1.0, 0.0)) + uFogColor, vec3(0.33));
+    vec3 foamCol = mix(uFogColor, vec3(0.9), 0.55) * clamp(0.35 + sky, 0.15, 1.2);
+    col = mix(col, foamCol, clamp(foam, 0.0, 0.5));
+  }
 
   // light echoes: reflected in the rippled surface + soft pools of light beneath them
   for (int i = 0; i < ORBS; i++) {
@@ -111,13 +128,14 @@ void main() {
     col += C.rgb * C.a * 0.07 / (1.0 + hd / (O.w * O.w * 1.5 + O.y * O.y * 0.5));
   }
 
-  col += ringLight * (0.6 + 0.4 * fres);
+  col += ringLight * (0.6 + 0.4 * fres) * (1.0 + uShimmer * 0.4);
 
-  // atmosphere: fog takes the colour of the sky right above the horizon, including the sun glow
+  // aerial perspective: distance fog toward the horizon colour of this direction,
+  // then the same view-angle haze band the sky uses, so the horizon has no seam
+  vec3 viewDir = -V;
   float fog = 1.0 - exp(-dist * uFogDensity);
-  vec3 fogDir = normalize(vec3(-V.x, 0.012, -V.z));
-  vec3 fogCol = skyGradient(fogDir);
-  col = mix(col, fogCol, clamp(fog, 0.0, 1.0));
+  col = mix(col, horizonTarget(viewDir), clamp(fog, 0.0, 1.0));
+  col = applyHaze(col, viewDir);
   gl_FragColor = vec4(col, 1.0);
 }
 `;
