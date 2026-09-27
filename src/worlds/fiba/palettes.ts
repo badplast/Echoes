@@ -2,82 +2,58 @@ import { Color } from 'three';
 import { lerp, smooth } from '../../core/derive';
 
 /**
- * FIBA palettes: cosy, low-saturation states of one quiet room.
- * Each defines the colour of the lamp, the light at the window, the air and the echoes.
- * WORLD then sets the hour: lamp-lit night -> blue pre-dawn -> soft early light.
+ * FIBA palettes colour the DREAM around her — backdrop, air, mist, the rim of light behind her,
+ * the dream motes — never her fur and never the lamp (a lamp is a lamp).
+ * COLOR walks through five tasteful states; HOUR (WORLD) sets how deep the night is.
  */
 interface Def {
   name: string;
-  lamp: string; // the globe lamp on the floor
-  moon: string; // night light at the window
-  dawn: string; // early light at the window
-  air: string; // ambient / fog
-  wall: string; // tint of the walls
-  accent: string; // light echoes
-  accent2: string; // sparkles
+  deep: string; // darkest backdrop tone
+  room: string; // mid backdrop tone (the wall in the dark)
+  glow: string; // window / moon glow in the backdrop
+  mist: string; // dream mist
+  rim: string; // back light on Fiba and the chair
+  dream: string; // dream motes, low notes
+  dream2: string; // dream motes, high notes
 }
 
 const DEFS: Def[] = [
-  { name: 'Warm Linen', lamp: '#ffb46e', moon: '#9fb0cf', dawn: '#f3dcc0', air: '#3a3430', wall: '#d9d0c4', accent: '#ffcf9a', accent2: '#fff1dc' },
-  { name: 'Moon Grey', lamp: '#ffae6a', moon: '#8fa6d6', dawn: '#c9d6ec', air: '#262c38', wall: '#c9ced8', accent: '#b9cdf2', accent2: '#eef3ff' },
-  { name: 'Amber', lamp: '#ff9a4a', moon: '#a49ec4', dawn: '#ffd49a', air: '#3a2a20', wall: '#dcc8ae', accent: '#ffb870', accent2: '#ffe7c2' },
-  { name: 'Dusty Lilac', lamp: '#ffae80', moon: '#a79cc9', dawn: '#e8cfd9', air: '#302a36', wall: '#d4ccd6', accent: '#e2bfd8', accent2: '#fbeaf4' },
-  { name: 'Early Blue', lamp: '#ffc08a', moon: '#8fb2d8', dawn: '#d6e8f6', air: '#243038', wall: '#cdd6dc', accent: '#a9d2f0', accent2: '#eef8ff' },
+  { name: 'Moon Linen', deep: '#0d0c10', room: '#2b2622', glow: '#c9cfe0', mist: '#8f877e', rim: '#b8b2c8', dream: '#ffd9a8', dream2: '#fff4e2' },
+  { name: 'Moonlit Blue', deep: '#070a12', room: '#18223a', glow: '#9fb8ec', mist: '#5e7196', rim: '#8fb0f0', dream: '#b8d0ff', dream2: '#eef4ff' },
+  { name: 'Dusty Blue', deep: '#0b0e12', room: '#27313b', glow: '#bcd2de', mist: '#7f94a2', rim: '#a9c4d4', dream: '#cfe6ee', dream2: '#f4fbff' },
+  { name: 'Lilac Dream', deep: '#0e0a12', room: '#2e2334', glow: '#d6c0e6', mist: '#8e7c9c', rim: '#c9aee0', dream: '#f0c6e4', dream2: '#fff0fa' },
+  { name: 'Amber Night', deep: '#100a06', room: '#33231a', glow: '#f0c89a', mist: '#9a7a5c', rim: '#e8b884', dream: '#ffc27a', dream2: '#fff0d2' },
 ];
 
 type Key = Exclude<keyof Def, 'name'>;
-const KEYS: Key[] = ['lamp', 'moon', 'dawn', 'air', 'wall', 'accent', 'accent2'];
+const KEYS: Key[] = ['deep', 'room', 'glow', 'mist', 'rim', 'dream', 'dream2'];
 const LIN = DEFS.map((d) => {
   const o = {} as Record<Key, Color>;
   for (const k of KEYS) o[k] = new Color(d[k]);
   return o;
 });
 
-export interface FibaLight {
-  lamp: Color;
-  lampI: number;
-  window: Color;
-  windowI: number;
-  ambient: Color;
-  ground: Color;
-  fog: Color;
-  wall: Color;
-  accent: Color;
-  accent2: Color;
-  exposure: number;
+export type DreamPalette = Record<Key, Color> & { bright: number };
+
+export function createPalette(): DreamPalette {
+  const o = { bright: 1 } as DreamPalette;
+  for (const k of KEYS) o[k] = new Color();
+  return o;
 }
 
-export function createLight(): FibaLight {
-  return {
-    lamp: new Color(), lampI: 1, window: new Color(), windowI: 1, ambient: new Color(), ground: new Color(),
-    fog: new Color(), wall: new Color(), accent: new Color(), accent2: new Color(), exposure: 1,
-  };
-}
+const DAWN = new Color('#b9c6dc');
 
-const tmp = new Color();
-
-/** COLOR picks the palette, WORLD the hour. */
-export function sampleLight(color: number, world: number, out: FibaLight): FibaLight {
+export function samplePalette(color: number, hour: number, out: DreamPalette): DreamPalette {
   const x = color * (LIN.length - 1);
   const i = Math.min(LIN.length - 2, Math.floor(x));
   const t = smooth(0, 1, x - i);
-  const P = {} as Record<Key, Color>;
-  for (const k of KEYS) P[k] = tmp.copy(LIN[i][k]).lerp(LIN[i + 1][k], t).clone();
-
-  const dawn = smooth(0.25, 0.75, world); // pre-dawn blue arrives
-  const day = smooth(0.6, 1, world); // soft early light
-  out.lamp.copy(P.lamp);
-  out.lampI = lerp(1.6, 0.35, smooth(0.3, 1, world));
-  // window: moonlight -> blue hour -> pale warm morning
-  out.window.copy(P.moon).lerp(new Color(0.32, 0.38, 0.62), dawn * (1 - day)).lerp(P.dawn, day);
-  out.windowI = lerp(0.55, 1.6, smooth(0.15, 1, world));
-  out.ambient.copy(P.air).multiplyScalar(lerp(0.5, 1.8, smooth(0.35, 1, world))).lerp(out.window, 0.25);
-  out.ground.copy(P.air).multiplyScalar(lerp(0.35, 1.1, world)).lerp(P.lamp, 0.12 * out.lampI);
-  out.fog.copy(P.air).multiplyScalar(lerp(0.25, 1.4, smooth(0.3, 1, world)));
-  out.wall.copy(P.wall);
-  out.accent.copy(P.accent);
-  out.accent2.copy(P.accent2);
-  out.exposure = lerp(1.0, 0.95, world);
+  const dawn = smooth(0.45, 1, hour);
+  for (const k of KEYS) {
+    out[k].copy(LIN[i][k]).lerp(LIN[i + 1][k], t);
+    // first light washes the dream toward a pale, cool morning
+    if (k === 'room' || k === 'deep' || k === 'mist') out[k].lerp(DAWN, dawn * (k === 'deep' ? 0.25 : 0.45));
+  }
+  out.bright = lerp(0.75, 2.4, smooth(0.2, 1, hour));
   return out;
 }
 

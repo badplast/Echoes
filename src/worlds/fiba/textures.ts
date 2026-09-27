@@ -57,7 +57,7 @@ export function fabric(kind: 'plain' | 'tufted' | 'channels', seed = 1): { map: 
         grad.addColorStop(0.5, 'rgba(0,0,0,0.35)');
         grad.addColorStop(1, 'rgba(0,0,0,0)');
         ctx.strokeStyle = grad;
-        ctx.lineWidth = 36;
+        ctx.lineWidth = 48;
         ctx.beginPath();
         ctx.moveTo(x0, y0);
         ctx.lineTo(x1, y1);
@@ -72,11 +72,12 @@ export function fabric(kind: 'plain' | 'tufted' | 'channels', seed = 1): { map: 
     }
   };
   const lines: [number, number, number, number][] = [];
-  if (kind === 'tufted') for (let k = 1; k < 4; k++) lines.push([(k * S) / 4, 0, (k * S) / 4, S], [0, (k * S) / 4, S, (k * S) / 4]);
+  if (kind === 'tufted') for (let k = 1; k < 3; k++) lines.push([(k * S) / 3, 0, (k * S) / 3, S], [0, (k * S) / 3, S, (k * S) / 3]);
   if (kind === 'channels') for (let k = 1; k < 3; k++) lines.push([(k * S) / 3, 0, (k * S) / 3, S]);
   if (kind === 'channels') for (let k = 1; k < 4; k++) lines.push([0, (k * S) / 4, S, (k * S) / 4]);
-  seam(g, 'rgba(40,42,46,0.8)', lines, false);
-  seam(gb, 'rgba(0,0,0,1)', lines, true);
+  // the stitches are subtle on the real chair: a soft dip in the padding, barely a line
+  seam(g, 'rgba(62,64,68,0.4)', lines, false);
+  seam(gb, 'rgba(0,0,0,0.7)', lines, true);
   return { map: tex(c), bump: tex(b, false) };
 }
 

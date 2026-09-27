@@ -16,6 +16,8 @@ interface Scheduled {
  */
 export class Generator {
   private memory: number[] = [];
+  /** FIBA music box: position in the lullaby pattern, time of the next note */
+  private lull = { step: 0, next: 0, pattern: [0, 2, 4, 7, 4, 2, 5, 3] };
   private queue: Scheduled[] = [];
   private nextEcho = 6;
   private nextDrip = 0;
@@ -54,6 +56,8 @@ export class Generator {
       const quiet = now - this.lastUserAt < 1.5 ? 2 : 0;
       this.nextEcho = now + Math.max(0.8, interval) + quiet;
     }
+
+    if (this.mode === 'fiba') this.lullaby(m);
 
     // TIDE: drops of rain. FIBA: grains of dust and fabric (TEXTURE + dreamy air + fader 2).
     const dripRate = this.mode === 'fiba'
@@ -104,12 +108,14 @@ export class Generator {
       }
       // ---------------------------------------------------------------- FIBA
       case 'dust': {
-        // a fine drift of high notes, like dust turning in the moonlight
-        let n = this.scale.quantize(root + 84);
-        for (let i = 0; i < 6; i++) {
-          this.play(n, v * 0.32 * (1 - i * 0.1), 1.3, i * 0.19 + Math.random() * 0.06, 'pad');
-          n = this.scale.step(n, Math.random() < 0.6 ? 1 : -1);
+        // stardust: a clear cascade of music-box notes falling through the scale
+        let n = this.scale.quantize(root + 86);
+        for (let i = 0; i < 9; i++) {
+          const note = n;
+          this.queue.push({ at: this.now + i * 0.11 + Math.random() * 0.02, fn: () => bus.emit('lullaby', { note, velocity: v * (0.85 - i * 0.05) }) });
+          n = this.scale.step(n, -1);
         }
+        this.play(this.scale.quantize(root + 62), v * 0.3, 3, 0.05, 'pad');
         break;
       }
       case 'purr': {
@@ -184,6 +190,33 @@ export class Generator {
       this.play(n2, vel * 0.8, 1.8, lerp(0.9, 0.35, m.motion));
       if (Math.random() < m.energy * 0.5) this.play(this.scale.step(n2, -1), vel * 0.65, 2.2, lerp(1.8, 0.7, m.motion));
     }
+  }
+
+  /**
+   * The music box (FIBA, fader 1 = LULLABY): a slow arpeggio in the current scale that the room
+   * plays by itself. Silent at 0; FLOAT sets its tempo; WONDER occasionally changes the figure.
+   */
+  private lullaby(m: Macros): void {
+    const level = m.atmos;
+    if (level < 0.03) {
+      this.lull.next = this.now + 0.5;
+      return;
+    }
+    if (this.now < this.lull.next) return;
+    const L = this.lull;
+    const deg = L.pattern[L.step % L.pattern.length];
+    const bar = Math.floor(L.step / L.pattern.length) % 4;
+    const base = this.scale.quantize(this.scale.root + 72 + (bar === 2 ? -5 : 0));
+    const note = this.scale.step(base, deg);
+    const accent = L.step % 4 === 0 ? 1 : 0.72;
+    bus.emit('lullaby', { note, velocity: Math.min(1, level * 0.8 * accent * (0.85 + Math.random() * 0.3)) });
+    L.step++;
+    if (L.step % L.pattern.length === 0 && Math.random() < 0.25 + m.chaos * 0.6) {
+      // a new little figure, still in the scale
+      L.pattern = L.pattern.map((d, i) => (i === 0 ? 0 : Math.max(-2, Math.min(9, d + Math.round((Math.random() - 0.5) * 3)))));
+    }
+    const beat = lerp(0.62, 0.3, m.motion);
+    L.next = this.now + beat * (L.step % 8 === 0 ? 2 : 1) * (1 + (Math.random() - 0.5) * m.chaos * 0.3);
   }
 
   private drip(): void {

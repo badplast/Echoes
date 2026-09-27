@@ -1,4 +1,4 @@
-import { WebGLRenderer } from 'three';
+import { Color, WebGLRenderer } from 'three';
 import { bus, type WorldId } from './core/events';
 import { ParameterStore } from './core/ParameterStore';
 import { Generator } from './core/Generator';
@@ -9,6 +9,7 @@ import type { World } from './worlds/World';
 import { WORLDS, worldEntry } from './worlds/registry';
 import { load, save } from './core/storage';
 import { UI, type UIHost } from './ui/UI';
+import { IntroScene } from './intro/IntroScene';
 
 /**
  * Wires the shared services together:
@@ -27,10 +28,13 @@ export class App implements UIHost {
   private worldFade = 1;
   private worldFadeTarget = 1;
   private switching = false;
+  /** The cover animation; lives until the first world has faded in. */
+  private intro: IntroScene | null = new IntroScene();
   private renderer: WebGLRenderer;
   private ui: UI;
   private entered = false;
   private reveal = 0;
+  private clearTmp = new Color();
   private last = performance.now();
   private raf = 0;
 
@@ -143,19 +147,36 @@ export class App implements UIHost {
 
     this.params.update(dt);
     const m = this.params.value;
+    // a world may still be compiling its shaders: keep the cover up and start revealing when ready
+    const worldReady = !!this.world && this.world.ready !== false;
     if (this.entered) {
-      this.reveal = Math.min(1, this.reveal + dt / 3.5);
+      if (worldReady) this.reveal = Math.min(1, this.reveal + dt / 3.5);
       this.generator.update(dt, m);
-    } else {
-      // behind the intro the world is already alive, just veiled
-      this.reveal = Math.min(0.42, this.reveal + dt / 3);
     }
     this.worldFade += (this.worldFadeTarget - this.worldFade) * (1 - Math.exp(-dt / (this.worldFadeTarget > 0.5 ? 0.9 : 0.25)));
     this.audio.update(m, dt);
-    if (this.world) {
+    // The world is only drawn once you enter; until then the cover has the screen to itself.
+    const drawWorld = this.entered && worldReady;
+    if (drawWorld) {
       const r = this.reveal * this.reveal * (3 - 2 * this.reveal);
-      this.world.setReveal(r * this.worldFade);
-      this.world.frame(dt, m);
+      this.world!.setReveal(r * this.worldFade);
+      this.world!.frame(dt, m);
+    }
+    if (this.intro) {
+      if (drawWorld) this.intro.fade = Math.max(0, this.intro.fade - dt / 1.8);
+      this.intro.render(this.renderer, dt, !drawWorld);
+      if (this.intro.fade <= 0) {
+        this.intro.dispose();
+        this.intro = null;
+      }
+    } else if (!drawWorld) {
+      // between worlds (the next one still preparing): a clean black frame, never a stale one
+      const alpha = this.renderer.getClearAlpha();
+      this.renderer.getClearColor(this.clearTmp);
+      this.renderer.setRenderTarget(null);
+      this.renderer.setClearColor(0x000000, 1);
+      this.renderer.clear();
+      this.renderer.setClearColor(this.clearTmp, alpha);
     }
     this.adaptResolution(rawDt);
   };

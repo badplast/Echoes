@@ -41,6 +41,8 @@ export interface AppEvents extends Record<string, unknown> {
   'note:on': NoteOn;
   'note:off': NoteOff;
   pad: { index: number; gesture: PadGesture; velocity: number };
+  /** FIBA's music box playing by itself (fader 1). */
+  lullaby: { note: number; velocity: number };
   /** A tiny weather grain: a water drop you hear and see. */
   drip: { note: number; velocity: number };
   /** bend -1..1, mod 0..1, pressure 0..1 */

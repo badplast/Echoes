@@ -28,6 +28,7 @@ import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
 import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+import { sanitizeShader } from '../../post/sanitize';
 
 import { bus, type NoteOn, type PadGesture } from '../../core/events';
 import type { Macros } from '../../core/ParameterStore';
@@ -363,6 +364,7 @@ export class TideWorld implements World {
     // ---- post: bloom + grade + tone mapping
     this.composer = new EffectComposer(renderer);
     this.composer.addPass(new RenderPass(this.scene, this.camera));
+    this.composer.addPass(new ShaderPass(sanitizeShader));
     this.bloom = new UnrealBloomPass(new Vector2(512, 512), 0.7, 0.75, 0.82);
     this.composer.addPass(this.bloom);
     this.finish = new ShaderPass(finishShader);

@@ -4,3 +4,5 @@ dist
 .DS_Store
 # local reference media (photos / video of the site)
 IN/
+# full-size review renders stay local (light JPG copies are committed)
+docs/fiba-review/*.png

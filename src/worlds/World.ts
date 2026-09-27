@@ -21,6 +21,8 @@ export interface World {
   paletteName?(color: number): string;
   /** Subscribe to the bus, build the scene. */
   mount(renderer: WebGLRenderer): void;
+  /** False while the world is still preparing (e.g. compiling shaders); the app keeps the cover up. */
+  readonly ready?: boolean;
   resize(width: number, height: number, pixelRatio: number): void;
   /** dt in seconds (clamped), macros are the smoothed shared values. */
   frame(dt: number, macros: Macros): void;
