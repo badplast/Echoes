@@ -24,6 +24,64 @@ interface Param {
   cancelAndHoldAtTime(t: number): unknown;
 }
 
+/**
+ * A native param that remembers when (and at what value) its latest scheduled event ends.
+ *
+ * Web Audio's cancelAndHoldAtTime() only inserts a hold point when something is still changing at
+ * that moment (a ramp in progress or a setTarget). When the param is at rest — a voice never played
+ * yet, or its last ramp finished long ago — no hold is inserted, and the next linear/exponential
+ * ramp starts from the time of that old event: by now it is almost complete, so the param jumps to
+ * its target at once. On the voices' gain and filter that jump was the audible click at note-on.
+ * Here a param at rest is anchored at its exact resting value first.
+ */
+class TrackedParam implements Param {
+  private end = 0;
+  private endValue: number;
+
+  constructor(private readonly p: Param) {
+    this.endValue = p.value;
+  }
+  get value(): number {
+    return this.p.value;
+  }
+  set value(v: number) {
+    this.p.value = v;
+    this.end = Tone.immediate();
+    this.endValue = v;
+  }
+  setValueAtTime(v: number, t: number): this {
+    this.p.setValueAtTime(v, t);
+    this.end = t;
+    this.endValue = v;
+    return this;
+  }
+  linearRampToValueAtTime(v: number, t: number): this {
+    this.p.linearRampToValueAtTime(v, t);
+    this.end = t;
+    this.endValue = v;
+    return this;
+  }
+  exponentialRampToValueAtTime(v: number, t: number): this {
+    this.p.exponentialRampToValueAtTime(v, t);
+    this.end = t;
+    this.endValue = v;
+    return this;
+  }
+  setTargetAtTime(v: number, t: number, c: number): this {
+    this.p.setTargetAtTime(v, t, c);
+    this.end = Infinity; // a setTarget never ends: a later cancelAndHold always gets a hold point
+    this.endValue = NaN;
+    return this;
+  }
+  cancelAndHoldAtTime(t: number): this {
+    this.p.cancelAndHoldAtTime(t);
+    if (this.end <= t) this.p.setValueAtTime(Number.isFinite(this.endValue) ? this.endValue : this.p.value, t);
+    else this.endValue = NaN; // held mid-change: the exact value is known only to the audio thread
+    this.end = t;
+    return this;
+  }
+}
+
 /** Several params driven as one: the two stages of the voice filter, the three saws of the fat oscillator. */
 class ParamGroup implements Param {
   constructor(private readonly ps: Param[]) {}
@@ -55,6 +113,16 @@ class ParamGroup implements Param {
   }
 }
 
+/**
+ * Move a voice param to a new value over 25 ms. A voice is often re-struck while its previous note
+ * still rings (fast repeats of one key): an instant setValueAtTime on pan, Q or a layer level of a
+ * sounding voice is a step in the waveform — an audible click.
+ */
+function glide(p: Param, v: number, t: number): void {
+  p.cancelAndHoldAtTime(t);
+  p.linearRampToValueAtTime(v, t + 0.025);
+}
+
 /** Ramp a param from wherever it is now (the native equivalent of Tone's rampTo). */
 function rampParam(p: Param, v: number, time: number): void {
   const t = Tone.immediate();
@@ -83,6 +151,14 @@ class Voice {
   readonly filterQ: ParamGroup;
   readonly amp: ReturnType<Ctx['createGain']>;
   readonly pan: ReturnType<Ctx['createStereoPanner']>;
+  // every automated param goes through a TrackedParam (see there: ramps from rest must not jump)
+  readonly ampGain: TrackedParam;
+  readonly sawLevel: TrackedParam;
+  readonly bodyLevel: TrackedParam;
+  readonly airLevel: TrackedParam;
+  readonly panPos: TrackedParam;
+  readonly bodyFreq: TrackedParam;
+  readonly airFreq: TrackedParam;
   id = '';
   note = -1;
   startedAt = -1;
@@ -145,9 +221,17 @@ class Voice {
       detune.connect(o.detune as unknown as Tone.InputNode);
       o.start();
     }
-    this.sawFreq = new ParamGroup(this.saws.map((s) => s.frequency));
-    this.filterFreq = new ParamGroup([f1.frequency, f2.frequency]);
-    this.filterQ = new ParamGroup([f1.Q, f2.Q]);
+    const tr = (p: Param) => new TrackedParam(p);
+    this.sawFreq = new ParamGroup(this.saws.map((s) => tr(s.frequency)));
+    this.filterFreq = new ParamGroup([tr(f1.frequency), tr(f2.frequency)]);
+    this.filterQ = new ParamGroup([tr(f1.Q), tr(f2.Q)]);
+    this.ampGain = tr(this.amp.gain);
+    this.sawLevel = tr(this.sawGain.gain);
+    this.bodyLevel = tr(this.bodyGain.gain);
+    this.airLevel = tr(this.airGain.gain);
+    this.panPos = tr(this.pan.pan);
+    this.bodyFreq = tr(this.body.frequency);
+    this.airFreq = tr(this.air.frequency);
     this.spread = 22;
   }
 
@@ -348,6 +432,9 @@ export class ToneEngine {
   private musicBoxPan!: Tone.Panner;
   /** FIBA: distant harmonic tails (octave + twelfth), replacing the granular pitch-shift shimmer */
   private halo!: LightPoly;
+  private chorusLfos: Tone.LFO[] = [];
+  /** last values given to setters that jump instantly (assigned only when they really change) */
+  private lastSet: Record<string, number> = {};
   /** output safety shaper (public for diagnostics) */
   safety!: Tone.WaveShaper;
   private haloGain!: Tone.Gain;
@@ -376,7 +463,11 @@ export class ToneEngine {
   async start(): Promise<void> {
     if (!this.ready) {
       // This module is loaded lazily from the user gesture, so Tone's context is born allowed to run.
-      Tone.getContext().lookAhead = 0.02;
+      // A 20 ms device buffer instead of the default ~10 ms. Every ~30 s this machine's render thread
+      // slows down for a moment (~2.5x per quantum for a few hundred ms, measured in a Chrome trace);
+      // with the lighter graph that is a deficit of a few ms, which 20 ms absorbs and 10 ms did not.
+      // Costs ~10 ms of extra output latency.
+      Tone.setContext(new Tone.Context({ latencyHint: 0.02 as unknown as AudioContextLatencyCategory, lookAhead: 0.02 }));
       await Tone.start();
       this.build();
       this.ready = true;
@@ -421,7 +512,11 @@ export class ToneEngine {
     }, 4096));
     safety.oversample = '4x';
     this.volumeNode.chain(safety, Tone.getDestination());
-    const limiter = new Tone.Limiter(-1.5);
+    // A real peak limiter: hard knee, 2 ms attack (plus the node's own look-ahead), 120 ms release.
+    // Tone.Limiter is a compressor with a 30 dB soft knee and a 10 ms release: loud chords went
+    // through it to ~1.3 FS, and the fast release rippled the gain inside each low cycle — both heard
+    // as grit/crackle on dense passages (the safety shaper below then had to bend the peaks).
+    const limiter = new Tone.Compressor({ threshold: -2, ratio: 20, knee: 0, attack: 0.002, release: 0.12 });
     const comp = new Tone.Compressor({ threshold: -20, ratio: 2.2, attack: 0.08, release: 0.6 });
     this.master = new Tone.Gain(0);
     const makeup = new Tone.Gain(1.45);
@@ -453,6 +548,14 @@ export class ToneEngine {
     this.voiceBus = new Tone.Gain(1);
     this.busFilter = new Tone.Filter({ type: 'lowpass', frequency: 2400, rolloff: -12, Q: 0.4 });
     this.chorus = new Tone.Chorus({ frequency: 0.25, delayTime: 4, depth: 0.5, wet: 0.3, spread: 160 }).start();
+    // Depth is driven through the LFOs' amplitude (a ramped param): with the range set once to the
+    // maximum, amplitude a gives exactly delay ± delay·a, the same as depth a. Tone's depth setter
+    // moves the range instantly — refreshed 30 times a second (twice, with different values, in
+    // FIBA) it cut steps into everything that passes the chorus: that was the audible crackle.
+    this.chorus.depth = 1;
+    const lfos = this.chorus as unknown as { _lfoL: Tone.LFO; _lfoR: Tone.LFO };
+    this.chorusLfos = [lfos._lfoL, lfos._lfoR];
+    for (const l of this.chorusLfos) l.amplitude.value = 0.5;
     this.sat = new Tone.Distortion({ distortion: 0.08, wet: 0.08, oversample: '2x' });
     const fxOut = new Tone.Gain(1);
     this.voiceBus.chain(this.busFilter, this.chorus, this.sat, fxOut);
@@ -675,23 +778,23 @@ export class ToneEngine {
     const cents = (Math.random() - 0.5) * chaos * 14;
     const f = freq * Math.pow(2, cents / 1200);
     v.sawFreq.setValueAtTime(f, t0);
-    v.body.frequency.setValueAtTime(f * (e.note > 55 ? 0.5 : 1), t0);
-    v.air.frequency.setValueAtTime(f * 2, t0);
+    v.bodyFreq.setValueAtTime(f * (e.note > 55 ? 0.5 : 1), t0);
+    v.airFreq.setValueAtTime(f * 2, t0);
 
     // WORLD = the character of the instrument.
     //   night: dark, round, narrow — triangle body, little saw, slow bloom
     //   day:   bright, airy, wide  — open saw with a touch of resonance, octave shimmer, quicker
     v.spread = lerp(8, 34, w) + m.texture * 10 + chaos * 8;
     // FIBA: no saw at all — a soft glass-flute: triangle body plus a sine an octave up
-    v.sawGain.gain.setValueAtTime(fiba ? 0 : lerp(0.2, 0.58, w), t0);
+    glide(v.sawLevel, fiba ? 0 : lerp(0.2, 0.58, w), t0);
     // FIBA: a soft sine-like tone, about as loud as a TIDE voice (the old 0.95 triangle clipped)
-    v.bodyGain.gain.setValueAtTime(fiba ? 0.42 : lerp(0.85, 0.22, w) * lerp(1, 0.5, pn), t0);
+    glide(v.bodyLevel, fiba ? 0.42 : lerp(0.85, 0.22, w) * lerp(1, 0.5, pn), t0);
     v.airBase = fiba ? lerp(0.1, 0.2, m.texture) * lerp(1, 0.6, pn) : smooth(0.35, 1, w) * 0.16 * lerp(1, 0.5, pn);
-    v.airGain.gain.cancelAndHoldAtTime(t0);
-    v.airGain.gain.linearRampToValueAtTime(v.airBase + this.mod * 0.12, t0 + 0.4);
-    v.filterQ.setValueAtTime(fiba ? 0.45 : lerp(0.5, 1.6, w), t0);
+    v.airLevel.cancelAndHoldAtTime(t0);
+    v.airLevel.linearRampToValueAtTime(v.airBase + this.mod * 0.12, t0 + 0.4);
+    glide(v.filterQ, fiba ? 0.45 : lerp(0.5, 1.6, w), t0);
     const spread = lerp(0.25, 1.0, w) * (fiba ? 0.6 : 1);
-    v.pan.pan.setValueAtTime(((pn - 0.5) * 0.6 + (Math.random() - 0.5) * (0.2 + chaos * 0.7)) * spread, t0);
+    glide(v.panPos, ((pn - 0.5) * 0.6 + (Math.random() - 0.5) * (0.2 + chaos * 0.7)) * spread, t0);
 
     // Soft, velocity-shaped envelopes. Attack stays ambient even when played hard.
     const attack = fiba ? lerp(0.9, 0.35, Math.pow(vel, 0.8)) * lerp(1.3, 0.8, m.motion) : lerp(1.25, 0.28, Math.pow(vel, 0.8)) * lerp(1.25, 0.85, m.energy) * lerp(1.35, 0.6, w);
@@ -699,7 +802,7 @@ export class ToneEngine {
     // the world's own echoes belong to the atmosphere (fader 1); pads and played notes do not
     const src = e.source === 'generative' ? 0.8 * Math.min(1.4, m.atmos / 0.7) : e.source === 'pad' ? 0.85 : 1;
     const peak = 0.62 * Math.pow(vel, 1.3) * pitchComp * src;
-    const g = v.amp.gain;
+    const g = v.ampGain;
     g.cancelAndHoldAtTime(t);
     if (dip) g.linearRampToValueAtTime(0, t0);
     g.linearRampToValueAtTime(peak, t0 + attack);
@@ -754,8 +857,8 @@ export class ToneEngine {
     const rel = (m ? lerp(3.2, 7.5, m.space) * lerp(1.1, 0.8, m.energy) * lerp(1.25, 0.85, m.world) : 5) * (this.world === 'fiba' ? 1.4 : 1);
     // A quick tap still blooms: let the attack finish, then fade.
     const from = Math.max(t, v.attackEnd + 0.002);
-    v.amp.gain.cancelAndHoldAtTime(from);
-    v.amp.gain.setTargetAtTime(0, from, rel / 4.5);
+    v.ampGain.cancelAndHoldAtTime(from);
+    v.ampGain.setTargetAtTime(0, from, rel / 4.5);
     v.filterFreq.cancelAndHoldAtTime(from);
     v.filterFreq.setTargetAtTime(Math.max(80, this.baseCutoff * 0.35), from, rel / 3);
     v.releasedAt = t;
@@ -869,6 +972,14 @@ export class ToneEngine {
 
   // ------------------------------------------------------------------ parameters
 
+  /** True (and remembered) when a value has moved by more than `eps` since it was last applied. */
+  private changed(key: string, v: number, eps: number): boolean {
+    const last = this.lastSet[key];
+    if (last !== undefined && Math.abs(last - v) <= eps) return false;
+    this.lastSet[key] = v;
+    return true;
+  }
+
   /** Called every frame; audio parameters are refreshed ~30x per second. */
   update(m: Macros, dt: number): void {
     this.m = m;
@@ -891,12 +1002,13 @@ export class ToneEngine {
     const busCut = lerp(900, 8000, w) * lerp(1.15, 0.78, warm) * (1 + this.expr.pressure * 1.6 + mod * 1.2) * lerp(1, 0.75, m.weather);
     this.busFilter.frequency.rampTo(busCut, R);
     this.reverbTone.frequency.rampTo(lerp(1500, 7000, w) * lerp(1.1, 0.85, warm) * lerp(1.15, 0.7, fog), R);
-    this.chorus.spread = lerp(90, 180, w);
+    if (this.changed('chorusSpread', lerp(90, 180, w), 1)) this.chorus.spread = this.lastSet.chorusSpread;
     // held notes follow the mod strip live: air/shimmer on top of whatever WORLD chose
-    for (const v of this.voices) if (v.down || v.sustained) rampParam(v.airGain.gain, v.airBase + mod * 0.12, R);
+    for (const v of this.voices) if (v.down || v.sustained) rampParam(v.airLevel, v.airBase + mod * 0.12, R);
 
     // TEXTURE: chorus movement and grain.
-    this.chorus.depth = Math.min(1, lerp(0.25, 0.85, m.texture) + mod * 0.25);
+    const chorusDepth = this.world === 'fiba' ? lerp(0.5, 0.9, m.motion) : Math.min(1, lerp(0.25, 0.85, m.texture) + mod * 0.25);
+    for (const l of this.chorusLfos) l.amplitude.rampTo(chorusDepth, R);
     this.chorus.wet.rampTo(lerp(0.18, 0.55, m.texture), R);
     this.chorus.frequency.rampTo(lerp(0.08, 0.7, m.motion) * (1 + m.chaos * 0.4 + e * 0.5), R);
     const satAmt = lerp(0.05, 0.45, m.texture);
@@ -943,9 +1055,11 @@ export class ToneEngine {
     }
     const droneLvl = Math.pow(m.drone / 0.6, 1.3); // 0.6 = the v0.1 level
     this.droneLfo.frequency.rampTo(lerp(0.015, 0.14, m.motion) * lerp(1, 2.2, e), R);
-    this.droneLfo.min = lerp(110, 260, w);
-    this.droneLfo.max = lerp(380, 1500, w) * lerp(1, 1.6, e);
-    this.droneA.spread = lerp(8, 34, m.chaos * 0.5 + m.texture * 0.5);
+    // these setters jump instantly: give each its final value once, and only when it has moved
+    if (this.changed('droneMin', lerp(110, 260, w), 2)) this.droneLfo.min = this.lastSet.droneMin;
+    const droneMax = this.world === 'fiba' ? lerp(300, 800, w) : lerp(380, 1500, w) * lerp(1, 1.6, e);
+    if (this.changed('droneMax', droneMax, 4)) this.droneLfo.max = this.lastSet.droneMax;
+    if (this.changed('droneSpread', lerp(8, 34, m.chaos * 0.5 + m.texture * 0.5), 0.5)) this.droneA.spread = this.lastSet.droneSpread;
     this.droneGain.gain.rampTo(lerp(0.075, 0.05, w) * lerp(0.8, 1.1, m.space) * droneLvl, 1);
     this.droneAirGain.gain.rampTo(smooth(0.35, 1, w) * 0.35 + m.drone * 0.15, 1);
 
@@ -957,7 +1071,7 @@ export class ToneEngine {
     this.haloGain.gain.rampTo(fiba ? lerp(0.5, 1, m.space) * lerp(0.7, 1.2, m.texture) : 0, 1.2);
     // density compensation (FIBA): sustained chords and HOLD stack many voices; keep the sum clean
     let sounding = 0;
-    for (const v of this.voices) if (v.amp.gain.value > 0.01) sounding++;
+    for (const v of this.voices) if (v.ampGain.value > 0.01) sounding++;
     this.density += (Math.max(1, sounding) - this.density) * 0.25;
     this.voiceBus.gain.rampTo(fiba ? Math.min(1, 2.2 / Math.sqrt(this.density)) : 1, 0.15);
     if (fiba) this.updateFiba(m);
@@ -971,7 +1085,7 @@ export class ToneEngine {
     const wx = m.weather;
     const rain = rainLevel(m);
     this.wind.frequency.rampTo(lerp(0.03, 0.3, m.motion * 0.5 + wx * 0.3 + e * 0.4), R);
-    this.wind.baseFrequency = lerp(180, 460, Math.max(wx, e * 0.8));
+    if (this.changed('windBase', lerp(180, 460, Math.max(wx, e * 0.8)), 2)) this.wind.baseFrequency = this.lastSet.windBase;
     const windLvl = 0.012 + smooth(0.05, 0.9, wx) * 0.1 + smooth(0.25, 1, e) * 0.16 + this.gust * 0.12 + mod * 0.05;
     this.windGain.gain.rampTo(windLvl, 0.2);
     this.rainGain.gain.rampTo(rain * 0.034 * lerp(0.7, 1.2, m.texture), R);
@@ -1004,7 +1118,6 @@ export class ToneEngine {
     this.revLargeGain.gain.rampTo(lerp(0.05, 0.7, m.space), R);
     this.delaySend.gain.rampTo(lerp(0.08, 0.2, m.space), R);
     this.chorus.wet.rampTo(lerp(0.35, 0.6, m.texture), R);
-    this.chorus.depth = lerp(0.5, 0.9, m.motion);
     this.sat.wet.rampTo(0, R);
     this.reverbSend.gain.rampTo(lerp(0.45, 0.85, m.space), R);
     // room tone stays a whisper; MIST breathes an airy veil into the dream
@@ -1017,7 +1130,6 @@ export class ToneEngine {
     this.purrFilter.frequency.rampTo(lerp(80, 120, w), 1);
     // the drone itself is softer here and sits lower
     this.droneGain.gain.rampTo(lerp(0.06, 0.045, w) * Math.pow(m.drone / 0.6, 1.3) * 0.7, 1);
-    this.droneLfo.max = lerp(300, 800, w);
   }
 
   /** Root pitch class drives the drone; 36 + pc keeps it low but audible. */
