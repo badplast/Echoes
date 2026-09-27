@@ -58,6 +58,9 @@ const LAMP_COLOR = new Color('#ffb372'); // fixed: COLOR never recolours the lam
 const MOON_COLOR = new Color('#aebbd8');
 const MOON_FROM = new Vector3(1.9, 2.6, -1.6); // where the moonlight comes from (a window off frame)
 const FOCUS = new Vector3(0.0, 0.68, 0.03);
+/** the composed area of the backdrop (its uv 0..1) */
+const BACKDROP_W = 6.4;
+const BACKDROP_H = 3.6;
 const Y_AXIS = new Vector3(0, 1, 0);
 const DUST = 2600;
 const BOKEH = 36;
@@ -95,10 +98,13 @@ float fbm(vec2 p) { float v = 0.0, a = 0.5; for (int i = 0; i < 5; i++) { v += a
 float softBox(vec2 p, vec2 c, vec2 hs, float blur) { vec2 d = abs(p - c) - hs; float o = length(max(d, 0.0)) + min(max(d.x, d.y), 0.0); return 1.0 - smoothstep(-blur, blur, o); }
 void main() {
   vec2 uv = vUv;
+  // beyond the composed area the room keeps the colour it has at the edge (no fade to black on
+  // very wide screens)
+  vec2 uc = clamp(uv, vec2(-0.08, -0.2), vec2(1.08, 1.15));
   float t = uTime;
   // the wall in the dark, the floor melting into it (everything out of focus)
   float floorZone = smoothstep(0.34, 0.2, uv.y);
-  vec3 col = mix(uDeep, uRoom, smoothstep(1.0, 0.25, uv.y) * smoothstep(0.0, 0.5, 1.0 - abs(uv.x - 0.45) * 1.3));
+  vec3 col = mix(uDeep, uRoom, smoothstep(1.0, 0.25, uc.y) * smoothstep(0.0, 0.5, 1.0 - abs(uc.x - 0.45) * 1.3));
   col = mix(col, uRoom * 0.8 + uLamp * 0.06 * uLampI, floorZone * 0.8);
   col *= uBright;
   // a window somewhere to the right: only its glow, blurred by the dream
@@ -145,7 +151,7 @@ void main() {
   float rays = pow(noise(vec2(ang * 22.0, t * 0.03)), 5.0) * smoothstep(0.0, 0.4, length(rp)) * smoothstep(1.2, 0.3, length(rp)) * step(rp.y, 0.0);
   col += uGlow * rays * 0.12 * (0.2 + uMoon);
   col += uGlow * uLift * 0.25;
-  float vig = smoothstep(1.1, 0.35, length((uv - vec2(0.48, 0.52)) * vec2(1.1, 1.3)));
+  float vig = smoothstep(1.1, 0.35, length((uc - vec2(0.48, 0.52)) * vec2(1.1, 1.3)));
   col *= mix(0.55, 1.0, vig);
   gl_FragColor = vec4(col * uReveal, 1.0);
 }
@@ -376,12 +382,17 @@ export class FibaWorld implements World {
           uBright: { value: 1 }, uMoon: { value: 0.5 }, uMistAmt: { value: 0.3 }, uLampI: { value: 1 }, uLift: { value: 0 },
           uReveal: { value: 0 }, uFloat: { value: 1 },
         },
-        vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
+        // uv is measured against the composed 6.4 × 3.6 area (window, lamp, leaves stay where they were
+        // designed); outside it the dream simply goes on in the deep colour of the palette
+        vertexShader: `varying vec2 vUv; void main(){ vUv = position.xy / vec2(${BACKDROP_W.toFixed(1)}, ${BACKDROP_H.toFixed(1)}) + 0.5; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
         fragmentShader: backdropFrag,
         depthWrite: false,
       }),
     );
-    const back = new Mesh(this.keep(new PlaneGeometry(6.4, 3.6)), this.backdrop);
+    // The plane itself is far larger than the composition: with DISTANCE at "wide dream" (fov 22°) on
+    // an ultrawide screen the frustum reaches ~6 m left of centre at this depth, past the old 6.4 m
+    // plane, and the clear colour showed as a black area with a hard edge.
+    const back = new Mesh(this.keep(new PlaneGeometry(40, 16)), this.backdrop);
     back.position.set(-0.2, 1.1, -1.9);
     back.renderOrder = -10;
     this.scene.add(back);
