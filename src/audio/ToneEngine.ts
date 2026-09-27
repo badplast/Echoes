@@ -1,9 +1,11 @@
 import * as Tone from 'tone';
+import './automationFlushFix';
 import { bus, type NoteOn, type PadGesture, type WorldId } from '../core/events';
 import type { Macros } from '../core/ParameterStore';
 import { echoFeedback, echoTime, fogLevel, lerp, pitchNorm, rainLevel, smooth, warmth } from '../core/derive';
 import { load, save } from '../core/storage';
 
+type Ctx = ReturnType<typeof Tone.getContext>['rawContext'];
 const VOICES = 12;
 const mtof = (n: number) => 440 * Math.pow(2, (n - 69) / 12);
 
@@ -12,16 +14,75 @@ const mtof = (n: number) => 440 * Math.pow(2, (n - 69) / 12);
  * -> 24 dB lowpass -> amp -> pan. WORLD sets the balance of the three, so night and day are
  * two different instruments rather than one filter position.
  */
+/** The minimal AudioParam surface the voices automate (native and standardized-audio-context params). */
+interface Param {
+  value: number;
+  setValueAtTime(v: number, t: number): unknown;
+  linearRampToValueAtTime(v: number, t: number): unknown;
+  exponentialRampToValueAtTime(v: number, t: number): unknown;
+  setTargetAtTime(v: number, t: number, c: number): unknown;
+  cancelAndHoldAtTime(t: number): unknown;
+}
+
+/** Several params driven as one: the two stages of the voice filter, the three saws of the fat oscillator. */
+class ParamGroup implements Param {
+  constructor(private readonly ps: Param[]) {}
+  get value(): number {
+    return this.ps[0].value;
+  }
+  set value(v: number) {
+    for (const p of this.ps) p.value = v;
+  }
+  setValueAtTime(v: number, t: number): this {
+    for (const p of this.ps) p.setValueAtTime(v, t);
+    return this;
+  }
+  linearRampToValueAtTime(v: number, t: number): this {
+    for (const p of this.ps) p.linearRampToValueAtTime(v, t);
+    return this;
+  }
+  exponentialRampToValueAtTime(v: number, t: number): this {
+    for (const p of this.ps) p.exponentialRampToValueAtTime(v, t);
+    return this;
+  }
+  setTargetAtTime(v: number, t: number, c: number): this {
+    for (const p of this.ps) p.setTargetAtTime(v, t, c);
+    return this;
+  }
+  cancelAndHoldAtTime(t: number): this {
+    for (const p of this.ps) p.cancelAndHoldAtTime(t);
+    return this;
+  }
+}
+
+/** Ramp a param from wherever it is now (the native equivalent of Tone's rampTo). */
+function rampParam(p: Param, v: number, time: number): void {
+  const t = Tone.immediate();
+  p.cancelAndHoldAtTime(t);
+  p.linearRampToValueAtTime(v, t + time);
+}
+
+/**
+ * One pad voice, built from plain Web Audio nodes (about 12 per voice).
+ *
+ * It used to be Tone objects — FatOscillator, two Oscillators, a −24 dB Filter — which expand to
+ * ~80 native nodes per voice (a ConstantSource + Gains for every parameter). Twelve voices made
+ * ~960 nodes that the render thread walks every 128 samples, whether a voice sounds or not. With
+ * everything else the audio thread used ~65–70 % of its budget, and ordinary system hiccups
+ * tipped it over: output underruns, heard as crackle. Same sound, a fraction of the cost.
+ */
 class Voice {
-  readonly saw: Tone.FatOscillator;
-  readonly sawGain: Tone.Gain;
-  readonly body: Tone.Oscillator;
-  readonly bodyGain: Tone.Gain;
-  readonly air: Tone.Oscillator;
-  readonly airGain: Tone.Gain;
-  readonly filter: Tone.Filter;
-  readonly amp: Tone.Gain;
-  readonly pan: Tone.Panner;
+  private readonly saws: ReturnType<Ctx['createOscillator']>[];
+  readonly sawFreq: ParamGroup;
+  readonly sawGain: ReturnType<Ctx['createGain']>;
+  readonly body: ReturnType<Ctx['createOscillator']>;
+  readonly bodyGain: ReturnType<Ctx['createGain']>;
+  readonly air: ReturnType<Ctx['createOscillator']>;
+  readonly airGain: ReturnType<Ctx['createGain']>;
+  readonly filterFreq: ParamGroup;
+  readonly filterQ: ParamGroup;
+  readonly amp: ReturnType<Ctx['createGain']>;
+  readonly pan: ReturnType<Ctx['createStereoPanner']>;
   id = '';
   note = -1;
   startedAt = -1;
@@ -35,28 +96,185 @@ class Voice {
   airBase = 0;
 
   constructor(out: Tone.InputNode, detune: Tone.LFO) {
-    this.saw = new Tone.FatOscillator({ type: 'sawtooth', count: 3, spread: 22, frequency: 220 });
-    this.sawGain = new Tone.Gain(0.5);
-    this.body = new Tone.Oscillator({ type: 'triangle', frequency: 110 });
-    this.bodyGain = new Tone.Gain(0.5);
-    this.air = new Tone.Oscillator({ type: 'sine', frequency: 440 });
-    this.airGain = new Tone.Gain(0);
-    this.filter = new Tone.Filter({ type: 'lowpass', rolloff: -24, Q: 0.6, frequency: 400 });
-    this.amp = new Tone.Gain(0);
-    this.pan = new Tone.Panner(0);
-    this.saw.chain(this.sawGain, this.filter);
-    this.body.chain(this.bodyGain, this.filter);
+    const c = Tone.getContext().rawContext as Ctx;
+    const osc = (type: OscillatorType, f: number) => {
+      const o = c.createOscillator();
+      o.type = type;
+      o.frequency.value = f;
+      return o;
+    };
+    const gain = (v: number) => {
+      const g = c.createGain();
+      g.gain.value = v;
+      return g;
+    };
+    // the fat saw: three detuned saws, each at -6 - 3·1.1 dB like Tone's FatOscillator(count 3)
+    this.saws = [0, 1, 2].map(() => osc('sawtooth', 220));
+    const sawMix = gain(Math.pow(10, (-6 - 3 * 1.1) / 20));
+    this.sawGain = gain(0.5);
+    this.body = osc('triangle', 110);
+    this.bodyGain = gain(0.5);
+    this.air = osc('sine', 440);
+    this.airGain = gain(0);
+    // -24 dB lowpass = two 12 dB stages sharing frequency and Q
+    const f1 = c.createBiquadFilter();
+    const f2 = c.createBiquadFilter();
+    for (const f of [f1, f2]) {
+      f.type = 'lowpass';
+      f.frequency.value = 400;
+      f.Q.value = 0.6;
+    }
+    this.amp = gain(0);
+    this.pan = c.createStereoPanner();
+    // like Tone.Panner: mono in, equal-power pan (-3 dB at centre) — keeps the old voice level
+    this.pan.channelCount = 1;
+    this.pan.channelCountMode = 'explicit';
+    for (const s of this.saws) s.connect(sawMix);
+    sawMix.connect(this.sawGain);
+    this.sawGain.connect(f1);
+    this.body.connect(this.bodyGain);
+    this.bodyGain.connect(f1);
+    f1.connect(f2);
+    f2.connect(this.amp);
     // the air layer bypasses the lowpass: it is the "daylight" shimmer on top
-    this.air.chain(this.airGain, this.amp);
-    this.filter.connect(this.amp);
+    this.air.connect(this.airGain);
+    this.airGain.connect(this.amp);
     this.amp.connect(this.pan);
-    this.pan.connect(out);
-    detune.connect(this.saw.detune);
-    detune.connect(this.body.detune);
-    detune.connect(this.air.detune);
-    this.saw.start();
-    this.body.start();
-    this.air.start();
+    Tone.connect(this.pan, out);
+    for (const o of [...this.saws, this.body, this.air]) {
+      detune.connect(o.detune as unknown as Tone.InputNode);
+      o.start();
+    }
+    this.sawFreq = new ParamGroup(this.saws.map((s) => s.frequency));
+    this.filterFreq = new ParamGroup([f1.frequency, f2.frequency]);
+    this.filterQ = new ParamGroup([f1.Q, f2.Q]);
+    this.spread = 22;
+  }
+
+  /** detune spread of the three saws, in cents (as FatOscillator.spread) */
+  set spread(cents: number) {
+    this.saws.forEach((s, i) => (s.detune.value = -cents / 2 + (cents / 2) * i));
+  }
+}
+
+interface Env {
+  attack: number;
+  decay: number;
+  sustain: number;
+  release: number;
+}
+interface LightPolyOptions {
+  /** two-operator FM (Tone.FMSynth) or a plain oscillator (Tone.Synth) */
+  fm: boolean;
+  harmonicity: number;
+  modulationIndex: number;
+  envelope: Env;
+  modulationEnvelope: Env;
+  volume: number;
+  maxPolyphony: number;
+}
+
+/**
+ * Tone's envelope, reproduced on a native AudioParam: linear attack, then Tone's "exponential"
+ * approach (time constant ln(t+1)/ln(200), finished by a short linear ramp at 90 %) for the decay
+ * and the release. The release may begin before the attack or the decay has finished.
+ */
+function scheduleEnvelope(p: Param, e: Env, t: number, peak: number, releaseAt: number): number {
+  const tc = (x: number) => Math.log(x + 1) / Math.log(200);
+  p.setValueAtTime(0, t);
+  p.linearRampToValueAtTime(peak, t + e.attack);
+  if (e.decay > 0 && e.sustain < 1) {
+    const dv = peak * e.sustain;
+    const ds = t + e.attack;
+    p.setTargetAtTime(dv, ds, tc(e.decay));
+    p.cancelAndHoldAtTime(ds + e.decay * 0.9);
+    p.linearRampToValueAtTime(dv, ds + e.decay);
+  }
+  p.cancelAndHoldAtTime(releaseAt);
+  p.setTargetAtTime(0, releaseAt, tc(e.release));
+  p.cancelAndHoldAtTime(releaseAt + e.release * 0.9);
+  p.linearRampToValueAtTime(0, releaseAt + e.release);
+  return releaseAt + e.release;
+}
+
+/**
+ * A light polyphonic synth with the same sound as Tone.PolySynth(FMSynth / Synth) for our patches.
+ * Tone builds 54 native nodes per FM voice (19 per Synth voice) and keeps idle ones alive; the
+ * bells, music box and halo held ~900 nodes in FIBA while playing. Here each note is 2–5 plain
+ * nodes, created for the note and released to the garbage collector when it has finished.
+ */
+class LightPoly {
+  readonly output: ReturnType<Ctx['createGain']>;
+  maxPolyphony: number;
+  private o: LightPolyOptions;
+  private ends: number[] = [];
+
+  constructor(opts: LightPolyOptions) {
+    this.o = { ...opts, envelope: { ...opts.envelope }, modulationEnvelope: { ...opts.modulationEnvelope } };
+    this.maxPolyphony = opts.maxPolyphony;
+    const c = Tone.getContext().rawContext as Ctx;
+    this.output = c.createGain();
+    this.output.gain.value = Math.pow(10, opts.volume / 20);
+  }
+
+  /** notes still sounding (including their release tails) */
+  get activeVoices(): number {
+    const now = Tone.immediate();
+    this.ends = this.ends.filter((e) => e > now);
+    return this.ends.length;
+  }
+
+  set(o: { harmonicity?: number; modulationIndex?: number; envelope?: Partial<Env> }): void {
+    if (o.harmonicity !== undefined) this.o.harmonicity = o.harmonicity;
+    if (o.modulationIndex !== undefined) this.o.modulationIndex = o.modulationIndex;
+    if (o.envelope) Object.assign(this.o.envelope, o.envelope);
+  }
+
+  connect(dest: Tone.InputNode): this {
+    Tone.connect(this.output, dest);
+    return this;
+  }
+
+  triggerAttackRelease(freq: number, duration: number, time: number, velocity = 1): void {
+    if (!Number.isFinite(freq) || freq <= 0) return;
+    const c = Tone.getContext().rawContext as Ctx;
+    const o = this.o;
+    const carrier = c.createOscillator();
+    carrier.frequency.value = freq;
+    const amp = c.createGain();
+    amp.gain.value = 0;
+    carrier.connect(amp);
+    amp.connect(this.output);
+    const rel = time + duration;
+    // Tone's ModulationSynth runs both its carrier and its modulator at -10 dB
+    const inner = o.fm ? Math.pow(10, -10 / 20) : 1;
+    let end = scheduleEnvelope(amp.gain, o.envelope, time, velocity * inner, rel);
+    const nodes: { disconnect(): void }[] = [carrier, amp];
+    const oscs = [carrier];
+    if (o.fm) {
+      // Tone.FMSynth: modulator at f·harmonicity, through its own envelope, scaled by
+      // f·modulationIndex, added to the carrier frequency
+      const mod = c.createOscillator();
+      mod.frequency.value = freq * o.harmonicity;
+      const modEnv = c.createGain();
+      modEnv.gain.value = 0;
+      const depth = c.createGain();
+      depth.gain.value = freq * o.modulationIndex * inner;
+      mod.connect(modEnv);
+      modEnv.connect(depth);
+      depth.connect(carrier.frequency);
+      end = Math.max(end, scheduleEnvelope(modEnv.gain, o.modulationEnvelope, time, 1, rel));
+      nodes.push(mod, modEnv, depth);
+      oscs.push(mod);
+    }
+    for (const x of oscs) {
+      x.start(time);
+      x.stop(end + 0.05);
+    }
+    carrier.onended = () => {
+      for (const n of nodes) n.disconnect();
+    };
+    this.ends.push(end);
   }
 }
 
@@ -69,7 +287,7 @@ class Voice {
 export class ToneEngine {
   ready = false;
   private voices: Voice[] = [];
-  private bell!: Tone.PolySynth<Tone.FMSynth>;
+  private bell!: LightPoly;
   private bellVol!: Tone.Volume;
   private drips: Tone.Synth[] = [];
   private dripPans: Tone.Panner[] = [];
@@ -125,6 +343,17 @@ export class ToneEngine {
   private swishFilter!: Tone.Filter;
   private swishGain!: Tone.Gain;
   private purrAccent = 0;
+  /** FIBA dream layers */
+  private musicBox!: LightPoly;
+  private musicBoxPan!: Tone.Panner;
+  /** FIBA: distant harmonic tails (octave + twelfth), replacing the granular pitch-shift shimmer */
+  private halo!: LightPoly;
+  /** output safety shaper (public for diagnostics) */
+  safety!: Tone.WaveShaper;
+  private haloGain!: Tone.Gain;
+  /** smoothed count of sounding voices, for density gain compensation */
+  private density = 1;
+  private breathGain!: Tone.Gain;
   private lastWorldBell = '';
 
   private sustain = false;
@@ -181,7 +410,17 @@ export class ToneEngine {
 
   private build(): void {
     // ---- master chain
-    this.volumeNode = new Tone.Volume(this.volume <= 0.001 ? -80 : 20 * Math.log10(this.volume)).toDestination();
+    this.volumeNode = new Tone.Volume(this.volume <= 0.001 ? -80 : 20 * Math.log10(this.volume));
+    // Last-resort safety: exactly linear below 0.9, then a smooth knee that can never exceed 1.0.
+    // Tone.Limiter is a DynamicsCompressor without look-ahead: fast attacks slip past it, and
+    // anything over 1.0 is hard-clipped by the browser (that was the crackle). This catches it.
+    const safety = (this.safety = new Tone.WaveShaper((x) => {
+      const a = Math.abs(x);
+      if (a <= 0.9) return x;
+      return Math.sign(x) * (0.9 + 0.1 * Math.tanh((a - 0.9) / 0.1));
+    }, 4096));
+    safety.oversample = '4x';
+    this.volumeNode.chain(safety, Tone.getDestination());
     const limiter = new Tone.Limiter(-1.5);
     const comp = new Tone.Compressor({ threshold: -20, ratio: 2.2, attack: 0.08, release: 0.6 });
     this.master = new Tone.Gain(0);
@@ -226,20 +465,21 @@ export class ToneEngine {
     // Shared pitch LFO = pitch bend + vibrato (mod strip) for every voice.
     this.detune = new Tone.LFO({ frequency: 4.6, min: 0, max: 0, type: 'sine' }).start();
     for (let i = 0; i < VOICES; i++) this.voices.push(new Voice(this.voiceBus, this.detune));
+    if (this.world === 'fiba') for (const v of this.voices) v.body.type = 'sine';
 
-    this.bell = new Tone.PolySynth(Tone.FMSynth, {
+    // Real playing measured 18 key strikes in 3 s (each bell voice lives ~3 s): leave headroom.
+    this.bell = new LightPoly({
+      fm: true,
       harmonicity: 3,
       modulationIndex: 2,
-      oscillator: { type: 'sine' },
-      modulation: { type: 'sine' },
       envelope: { attack: 0.006, decay: 2.8, sustain: 0, release: 3 },
       modulationEnvelope: { attack: 0.004, decay: 0.7, sustain: 0, release: 0.6 },
       volume: -13,
+      maxPolyphony: 32,
     });
-    // Real playing measured 18 key strikes in 3 s (each bell voice lives ~3 s): leave headroom.
-    this.bell.maxPolyphony = 32;
     this.bellVol = new Tone.Volume(0);
-    this.bell.chain(this.bellVol, this.chorus);
+    this.bell.connect(this.bellVol);
+    this.bellVol.connect(this.chorus);
 
     // ---- atmosphere of the place (fader 1 scales all of it)
     this.atmosBus = new Tone.Gain(1);
@@ -355,7 +595,46 @@ export class ToneEngine {
     this.swishGain = new Tone.Gain(0);
     pink.chain(this.swishFilter, this.swishGain, this.fibaBus);
 
+    // music box (FIBA fader 1 = LULLABY, pad 2 stardust): tiny glassy plucks, two octaves of shine
+    this.musicBox = new LightPoly({
+      fm: true,
+      harmonicity: 4,
+      modulationIndex: 1.1,
+      envelope: { attack: 0.002, decay: 1.6, sustain: 0, release: 1.4 },
+      modulationEnvelope: { attack: 0.002, decay: 0.25, sustain: 0, release: 0.3 },
+      volume: -5,
+      maxPolyphony: 24,
+    });
+    this.musicBoxPan = new Tone.Panner(0);
+    this.musicBox.connect(this.musicBoxPan);
+    this.musicBoxPan.connect(this.chorus);
+    // halo (FIBA): each note leaves soft sine partials an octave and a twelfth above, slow in,
+    // long out, mostly heard through the big hall — clean "distant harmonic tails"
+    this.halo = new LightPoly({
+      fm: false,
+      harmonicity: 1,
+      modulationIndex: 0,
+      envelope: { attack: 0.9, decay: 1.5, sustain: 0.35, release: 5 },
+      modulationEnvelope: { attack: 0, decay: 0, sustain: 0, release: 0 },
+      volume: -18,
+      maxPolyphony: 12,
+    });
+    this.haloGain = new Tone.Gain(0);
+    const haloLp = new Tone.Filter({ type: 'lowpass', frequency: 5200, rolloff: -12 });
+    this.halo.connect(haloLp);
+    haloLp.connect(this.haloGain);
+    this.haloGain.connect(this.revLarge);
+    const haloDry = new Tone.Gain(0.35);
+    this.haloGain.connect(haloDry);
+    haloDry.connect(this.master);
+    // airy breath of the dream (MIST)
+    const breathBp = new Tone.Filter({ type: 'bandpass', frequency: 1900, Q: 0.5 });
+    const breathTrem = new Tone.Tremolo({ frequency: 0.09, depth: 0.6, spread: 90 }).start();
+    this.breathGain = new Tone.Gain(0);
+    pink.chain(breathBp, breathTrem, this.breathGain, this.fibaBus);
+
     this.unsubs.push(
+      bus.on('lullaby', (e) => this.lullaby(e.note, e.velocity)),
       bus.on('cat:move', (e) => this.catMove(e.strength)),
       bus.on('note:on', (e) => this.noteOn(e)),
       bus.on('note:off', (e) => this.noteOff(e.id)),
@@ -373,6 +652,8 @@ export class ToneEngine {
 
   private noteOn(e: NoteOn): void {
     if (!this.ready || !this.m) return;
+    // defensive: a malformed event (non-numeric pitch) must never reach the audio params
+    if (!Number.isFinite(mtof(e.note)) || !Number.isFinite(e.velocity)) return;
     const m = this.m;
     const t = Tone.immediate() + 0.005;
     const vel = e.velocity;
@@ -393,25 +674,27 @@ export class ToneEngine {
     const freq = mtof(e.note);
     const cents = (Math.random() - 0.5) * chaos * 14;
     const f = freq * Math.pow(2, cents / 1200);
-    v.saw.frequency.setValueAtTime(f, t0);
+    v.sawFreq.setValueAtTime(f, t0);
     v.body.frequency.setValueAtTime(f * (e.note > 55 ? 0.5 : 1), t0);
     v.air.frequency.setValueAtTime(f * 2, t0);
 
     // WORLD = the character of the instrument.
     //   night: dark, round, narrow — triangle body, little saw, slow bloom
     //   day:   bright, airy, wide  — open saw with a touch of resonance, octave shimmer, quicker
-    v.saw.spread = lerp(8, 34, w) + m.texture * 10 + chaos * 8;
-    v.sawGain.gain.setValueAtTime(lerp(0.2, 0.58, w) * (fiba ? 0.4 : 1), t0);
-    v.bodyGain.gain.setValueAtTime(lerp(0.85, 0.22, w) * lerp(1, 0.5, pn) * (fiba ? 1.25 : 1), t0);
-    v.airBase = smooth(0.35, 1, w) * 0.16 * lerp(1, 0.5, pn) * (fiba ? 0.5 : 1);
+    v.spread = lerp(8, 34, w) + m.texture * 10 + chaos * 8;
+    // FIBA: no saw at all — a soft glass-flute: triangle body plus a sine an octave up
+    v.sawGain.gain.setValueAtTime(fiba ? 0 : lerp(0.2, 0.58, w), t0);
+    // FIBA: a soft sine-like tone, about as loud as a TIDE voice (the old 0.95 triangle clipped)
+    v.bodyGain.gain.setValueAtTime(fiba ? 0.42 : lerp(0.85, 0.22, w) * lerp(1, 0.5, pn), t0);
+    v.airBase = fiba ? lerp(0.1, 0.2, m.texture) * lerp(1, 0.6, pn) : smooth(0.35, 1, w) * 0.16 * lerp(1, 0.5, pn);
     v.airGain.gain.cancelAndHoldAtTime(t0);
     v.airGain.gain.linearRampToValueAtTime(v.airBase + this.mod * 0.12, t0 + 0.4);
-    v.filter.Q.setValueAtTime(fiba ? 0.45 : lerp(0.5, 1.6, w), t0);
+    v.filterQ.setValueAtTime(fiba ? 0.45 : lerp(0.5, 1.6, w), t0);
     const spread = lerp(0.25, 1.0, w) * (fiba ? 0.6 : 1);
     v.pan.pan.setValueAtTime(((pn - 0.5) * 0.6 + (Math.random() - 0.5) * (0.2 + chaos * 0.7)) * spread, t0);
 
     // Soft, velocity-shaped envelopes. Attack stays ambient even when played hard.
-    const attack = lerp(1.25, 0.28, Math.pow(vel, 0.8)) * lerp(1.25, 0.85, m.energy) * lerp(1.35, 0.6, w) * (fiba ? 1.3 : 1);
+    const attack = fiba ? lerp(0.9, 0.35, Math.pow(vel, 0.8)) * lerp(1.3, 0.8, m.motion) : lerp(1.25, 0.28, Math.pow(vel, 0.8)) * lerp(1.25, 0.85, m.energy) * lerp(1.35, 0.6, w);
     const pitchComp = pn > 0.62 ? lerp(1, 0.55, (pn - 0.62) / 0.38) : pn < 0.2 ? 0.8 : 1;
     // the world's own echoes belong to the atmosphere (fader 1); pads and played notes do not
     const src = e.source === 'generative' ? 0.8 * Math.min(1.4, m.atmos / 0.7) : e.source === 'pad' ? 0.85 : 1;
@@ -423,7 +706,7 @@ export class ToneEngine {
     g.setTargetAtTime(peak * lerp(0.72, 0.55, w), t0 + attack, 1.8);
 
     const cut = this.baseCutoff * Math.pow(2, (e.note - 60) / 30);
-    const fq = v.filter.frequency;
+    const fq = v.filterFreq;
     fq.cancelAndHoldAtTime(t);
     fq.exponentialRampToValueAtTime(Math.max(80, cut * 0.45), t0 + 0.02);
     fq.exponentialRampToValueAtTime(Math.min(12000, cut * lerp(1.3, 4, vel)), t0 + attack * 1.1 + 0.05);
@@ -440,8 +723,17 @@ export class ToneEngine {
     // The bell: the drop-into-water articulation you hear the instant you press.
     // Night: a soft, almost sine "kalimba" low in the mix. Day: a clear glass bell.
     const bellNote = e.note < 60 ? e.note + 12 : e.note;
-    const bellVel = Math.pow(vel, 1.6) * lerp(0.35, 1, pn) * lerp(0.45, 1.2, w) * (1 + this.mod * 0.5) * (e.source === 'generative' ? 0.7 : 1) * (fiba ? 0.75 : 1);
-    if (bellVel > 0.02 && this.bell.activeVoices < this.bell.maxPolyphony) this.bell.triggerAttackRelease(mtof(bellNote) * Math.pow(2, cents / 2400), 0.05, t, Math.min(1, bellVel));
+    // FIBA: the dream bell answers every note, clearer as SPARKLE (texture) rises
+    // halo: distant harmonic tails for each FIBA note
+    if (fiba && e.source !== 'generative' && this.halo.activeVoices < this.halo.maxPolyphony - 2) {
+      const hv = Math.min(1, 0.25 + vel * 0.5);
+      this.halo.triggerAttackRelease(mtof(e.note + 12), 0.8, t + 0.02, hv);
+      if (vel > 0.45) this.halo.triggerAttackRelease(mtof(e.note + 19), 0.6, t + 0.12, hv * 0.55);
+    }
+    const bellVel = fiba
+      ? Math.pow(vel, 1.3) * lerp(0.5, 1, pn) * lerp(0.45, 0.9, m.texture) * (1 + this.mod * 0.4) * (e.source === 'generative' ? 0.7 : 1)
+      : Math.pow(vel, 1.6) * lerp(0.35, 1, pn) * lerp(0.45, 1.2, w) * (1 + this.mod * 0.5) * (e.source === 'generative' ? 0.7 : 1);
+    if (bellVel > 0.02 && this.bell.activeVoices < (fiba ? 16 : this.bell.maxPolyphony)) this.bell.triggerAttackRelease(mtof(bellNote) * Math.pow(2, cents / 2400), 0.05, t, Math.min(1, bellVel));
   }
 
   private noteOff(id: string): void {
@@ -459,13 +751,13 @@ export class ToneEngine {
   private release(v: Voice): void {
     const m = this.m;
     const t = Tone.immediate() + 0.005;
-    const rel = (m ? lerp(3.2, 7.5, m.space) * lerp(1.1, 0.8, m.energy) * lerp(1.25, 0.85, m.world) : 5) * (this.world === 'fiba' ? 1.2 : 1);
+    const rel = (m ? lerp(3.2, 7.5, m.space) * lerp(1.1, 0.8, m.energy) * lerp(1.25, 0.85, m.world) : 5) * (this.world === 'fiba' ? 1.4 : 1);
     // A quick tap still blooms: let the attack finish, then fade.
     const from = Math.max(t, v.attackEnd + 0.002);
     v.amp.gain.cancelAndHoldAtTime(from);
     v.amp.gain.setTargetAtTime(0, from, rel / 4.5);
-    v.filter.frequency.cancelAndHoldAtTime(from);
-    v.filter.frequency.setTargetAtTime(Math.max(80, this.baseCutoff * 0.35), from, rel / 3);
+    v.filterFreq.cancelAndHoldAtTime(from);
+    v.filterFreq.setTargetAtTime(Math.max(80, this.baseCutoff * 0.35), from, rel / 3);
     v.releasedAt = t;
     v.sustained = false;
     v.id = '';
@@ -509,23 +801,38 @@ export class ToneEngine {
     this.detune.max = bendCents + depth;
   }
 
+  private lastRustle = 0;
+  private dripLast: number[] = [];
+
   private drip(note: number, velocity: number): void {
     if (!this.ready || !this.m) return;
     if (this.world === 'fiba') {
-      const t = Tone.immediate() + 0.005;
+      // one noise source: two rustles in the same audio block would restart it at the same
+      // instant, which Tone rejects with an exception — keep them strictly apart
+      const t = Math.max(Tone.immediate() + 0.005, this.lastRustle + 0.012);
+      this.lastRustle = t;
       this.rustlePan.pan.setValueAtTime((Math.random() - 0.5) * 1.2, t);
       this.rustle.volume.setValueAtTime(-40 + velocity * 8 + this.m.texture * 4, t);
       this.rustle.triggerAttackRelease(0.03, t, 0.6);
       return;
     }
-    const s = this.drips[this.dripIdx++ % this.drips.length];
-    const t = Tone.immediate() + 0.005;
+    const di = this.dripIdx++ % this.drips.length;
+    const s = this.drips[di];
+    const t = Math.max(Tone.immediate() + 0.005, (this.dripLast[di] ?? 0) + 0.012);
+    this.dripLast[di] = t;
     const f = mtof(note);
     const loud = rainLevel(this.m) * velocity;
     s.volume.setValueAtTime(-38 + loud * 12 + this.m.texture * 3, t);
     s.triggerAttackRelease(f, 0.03, t, 0.7);
     s.frequency.exponentialRampToValueAtTime(f * 1.9, t + 0.07);
     this.dripPans[(this.dripIdx - 1) % this.dripPans.length].pan.setValueAtTime((Math.random() - 0.5) * 1.4, t);
+  }
+
+  private lullaby(note: number, velocity: number): void {
+    if (!this.ready || !this.m) return;
+    const t = Tone.immediate() + 0.005;
+    this.musicBoxPan.pan.setValueAtTime((Math.random() - 0.5) * lerp(0.4, 1.2, this.m.chaos), t);
+    if (this.musicBox.activeVoices < this.musicBox.maxPolyphony) this.musicBox.triggerAttackRelease(mtof(note), 0.05, t, Math.min(1, velocity));
   }
 
   /** Fiba shifting on the fabric: a soft, short rustle. */
@@ -586,7 +893,7 @@ export class ToneEngine {
     this.reverbTone.frequency.rampTo(lerp(1500, 7000, w) * lerp(1.1, 0.85, warm) * lerp(1.15, 0.7, fog), R);
     this.chorus.spread = lerp(90, 180, w);
     // held notes follow the mod strip live: air/shimmer on top of whatever WORLD chose
-    for (const v of this.voices) if (v.down || v.sustained) v.airGain.gain.rampTo(v.airBase + mod * 0.12, R);
+    for (const v of this.voices) if (v.down || v.sustained) rampParam(v.airGain.gain, v.airBase + mod * 0.12, R);
 
     // TEXTURE: chorus movement and grain.
     this.chorus.depth = Math.min(1, lerp(0.25, 0.85, m.texture) + mod * 0.25);
@@ -610,13 +917,13 @@ export class ToneEngine {
     // Bell: night = soft rounded kalimba, day = clear glass; mod brightens it.
     // In FIBA it stays a quiet music box: octave partial, a little shimmer.
     const inFiba = this.world === 'fiba';
-    const h = inFiba ? 2 : w < 0.33 ? 1 : w < 0.66 ? 2 : 3;
-    const mi = Math.round(((inFiba ? lerp(0.5, 1.4, w) : lerp(0.6, 3.4, w)) + m.texture * (inFiba ? 0.4 : 1.2) + mod * 2) * 10) / 10;
+    const h = inFiba ? 4 : w < 0.33 ? 1 : w < 0.66 ? 2 : 3;
+    const mi = Math.round(((inFiba ? lerp(0.2, 0.75, m.texture) : lerp(0.6, 3.4, w) + m.texture * 1.2) + mod * (inFiba ? 0.8 : 2)) * 10) / 10;
     if (h !== this.lastBell.h || Math.abs(mi - this.lastBell.mi) > 0.25) {
       this.bell.set({ harmonicity: h, modulationIndex: mi });
       this.lastBell = { h, mi };
     }
-    this.bellVol.volume.rampTo(lerp(-6, 0, w) + mod * 3, R);
+    this.bellVol.volume.rampTo(inFiba ? -5 + mod * 2 : lerp(-6, 0, w) + mod * 3, R);
 
     // Drone (fader 4) follows the root and breathes with MOTION; WORLD changes its character.
     const root = this.rootMidi;
@@ -646,11 +953,17 @@ export class ToneEngine {
     const fiba = this.world === 'fiba';
     const atmosLevel = Math.pow(m.atmos / 0.7, 2);
     this.atmosBus.gain.rampTo(fiba ? 0 : atmosLevel, 1.2);
-    this.fibaBus.gain.rampTo(fiba ? atmosLevel : 0, 1.2);
+    this.fibaBus.gain.rampTo(fiba ? 1 : 0, 1.2);
+    this.haloGain.gain.rampTo(fiba ? lerp(0.5, 1, m.space) * lerp(0.7, 1.2, m.texture) : 0, 1.2);
+    // density compensation (FIBA): sustained chords and HOLD stack many voices; keep the sum clean
+    let sounding = 0;
+    for (const v of this.voices) if (v.amp.gain.value > 0.01) sounding++;
+    this.density += (Math.max(1, sounding) - this.density) * 0.25;
+    this.voiceBus.gain.rampTo(fiba ? Math.min(1, 2.2 / Math.sqrt(this.density)) : 1, 0.15);
     if (fiba) this.updateFiba(m);
     if (this.lastWorldBell !== this.world) {
       this.lastWorldBell = this.world;
-      this.bell.set({ envelope: { decay: fiba ? 1.9 : 2.8, release: fiba ? 2.2 : 3 } });
+      this.bell.set({ envelope: { decay: fiba ? 4.5 : 2.8, release: fiba ? 4 : 3 } });
       this.lastBell = { h: -1, mi: -1 };
     }
 
@@ -674,6 +987,8 @@ export class ToneEngine {
   world: WorldId = 'tide';
   setWorld(id: WorldId): void {
     this.world = id;
+    // FIBA voices sing with sines; TIDE keeps its triangle body
+    if (this.ready) for (const v of this.voices) v.body.type = id === 'fiba' ? 'sine' : 'triangle';
     this.applyDetune();
   }
 
@@ -682,15 +997,19 @@ export class ToneEngine {
     const R = 0.12;
     const w = m.world;
     // the lamp-lit night is darker and closer than the sea; SPACE opens it into a dream-room
-    this.busFilter.frequency.rampTo(lerp(700, 3800, w) * (1 + this.mod * 1.2) * lerp(1.1, 0.8, m.fog), R);
-    this.baseCutoff *= 0.55;
-    this.reverbTone.frequency.rampTo(lerp(1400, 3600, w) * lerp(1.1, 0.75, m.fog), R);
+    this.busFilter.frequency.rampTo(lerp(1800, 5200, w) * (1 + this.mod * 1.2), R);
+    this.baseCutoff = lerp(1400, 2600, w) * (1 + this.mod * 0.8);
+    this.reverbTone.frequency.rampTo(lerp(3200, 6500, w), R);
     this.revSmallGain.gain.rampTo(lerp(0.9, 0.35, m.space), R);
     this.revLargeGain.gain.rampTo(lerp(0.05, 0.7, m.space), R);
-    this.delaySend.gain.rampTo(lerp(0.05, 0.16, m.space), R);
-    this.chorus.wet.rampTo(lerp(0.25, 0.45, m.texture), R);
-    // room tone: the air of the room, a little more when the air is dreamy
-    this.roomGain.gain.rampTo(lerp(0.012, 0.03, m.weather) * lerp(0.8, 1.3, m.texture), 0.5);
+    this.delaySend.gain.rampTo(lerp(0.08, 0.2, m.space), R);
+    this.chorus.wet.rampTo(lerp(0.35, 0.6, m.texture), R);
+    this.chorus.depth = lerp(0.5, 0.9, m.motion);
+    this.sat.wet.rampTo(0, R);
+    this.reverbSend.gain.rampTo(lerp(0.45, 0.85, m.space), R);
+    // room tone stays a whisper; MIST breathes an airy veil into the dream
+    this.roomGain.gain.rampTo(0.006, 0.5);
+    this.breathGain.gain.rampTo(Math.pow(m.weather, 1.3) * 0.05, 0.5);
     // purr: under the drone (fader 4), deeper when she is content (pad), breathing slowly
     const breath = 0.6 + 0.4 * Math.sin(performance.now() / 1000 * Math.PI * 2 * lerp(0.2, 0.3, m.energy));
     this.purrGain.gain.rampTo((Math.pow(m.drone, 1.5) * 0.22 + this.purrAccent * 0.35) * breath, 0.15);
